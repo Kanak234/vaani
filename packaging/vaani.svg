@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="28" fill="#171A21"/>
+  <!-- microphone capsule -->
+  <rect x="52" y="26" width="24" height="46" rx="12" fill="#4F8DF7"/>
+  <!-- pickup arc -->
+  <path d="M40 62a24 24 0 0 0 48 0" fill="none" stroke="#E8EAED"
+        stroke-width="6" stroke-linecap="round"/>
+  <line x1="64" y1="86" x2="64" y2="98" stroke="#E8EAED"
+        stroke-width="6" stroke-linecap="round"/>
+  <!-- outgoing speech: the translated voice leaving as sound -->
+  <path d="M94 44c6 6 6 30 0 36" fill="none" stroke="#22C55E"
+        stroke-width="5" stroke-linecap="round"/>
+  <path d="M104 34c11 11 11 50 0 61" fill="none" stroke="#22C55E"
+        stroke-width="5" stroke-linecap="round" opacity="0.55"/>
+</svg>

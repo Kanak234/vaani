@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Vaani launcher.
+#
+# Wraps the three things that are easy to get wrong when running by hand:
+#   * the project directory (its path contains spaces)
+#   * PYTHONPATH=src, since the package is not installed
+#   * unsetting LD_LIBRARY_PATH -- vaani.ai.stt.cuda_setup sets it itself, and a
+#     stale inherited value stops CTranslate2 finding the pip CUDA libraries,
+#     which silently drops everything to CPU and makes STT ~10x slower.
+set -euo pipefail
+# Resolve symlinks: this script is normally invoked via ~/.local/bin/vaani,
+# where BASH_SOURCE points at the link, not at the project.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  LINK="$(readlink "$SELF")"
+  [[ "$LINK" = /* ]] && SELF="$LINK" || SELF="$(dirname "$SELF")/$LINK"
+done
+HERE="$(cd -- "$(dirname -- "$SELF")" && pwd)"
+PY="$HERE/.venv/bin/python"
+
+if [[ ! -x "$PY" ]]; then
+  echo "vaani: virtualenv missing at $PY" >&2
+  echo "       create it with:  uv venv --python 3.14 .venv" >&2
+  exit 2
+fi
+
+cd "$HERE"
+exec env -u LD_LIBRARY_PATH PYTHONPATH="$HERE/src" "$PY" -u -m vaani.cli "$@"
