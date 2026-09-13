@@ -1,19 +1,17 @@
-"""End-to-end meeting takeover host.
+"""End-to-end meeting takeover host for Linux and Windows.
 
-This is the integration layer for the existing session and takeover runtime:
+Windows topology:
+  user mic -> Vaani translation -> virtual-cable playback -> meeting mic input
+  meeting speaker loopback -> Whisper -> question policy -> local answer LLM
+  -> personal voice -> the same virtual-cable playback
 
-  user mic -> existing TranslationSession -> Vaani Virtual Microphone
-  meeting source -> Whisper -> question detector -> takeover policy
-                                     -> local answer LLM -> personal voice
-                                     -> the same Vaani Virtual Microphone
-
-The meeting source is a separate Pulse/PipeWire capture device (normally a
-meeting application's monitor/loopback source). It is never routed into the
-translation pipeline, preventing the assistant from translating its own output.
+Vaani does not install a Windows kernel audio driver. A virtual audio cable is
+therefore an explicit endpoint selected with ``--output-device``.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 import time
 
@@ -25,13 +23,11 @@ from ..ai.stt.whisper import FasterWhisperRecognizer
 from ..ai.tts.fallback import FallbackSynthesizer
 from ..ai.translate.ollama import OllamaTranslator
 from ..ai.vad.energy import EnergyVad
-from ..audio.backend.pulse_backend import PulseCaptureStream
 from ..audio.segmenter import SegmenterConfig, UtteranceSegmenter
 from ..core.types import PerformanceMode
 
 
 def looks_like_question(text: str) -> bool:
-    """Conservative detector; statements are never handed to the answer model."""
     text = text.strip().lower()
     if not text:
         return False
@@ -55,11 +51,12 @@ def looks_hesitant(text: str) -> bool:
 
 
 class MeetingTakeoverApp:
-    """Owns remote-audio capture while reusing the normal translation session."""
+    """Own remote-audio capture while reusing Vaani's normal pipeline."""
 
     def __init__(self, *, input_device: str | None, remote_input_device: str,
-                 model: str = "small", llm_model: str = "qwen3:8b",
-                 voice: str = "personal", voice_profile_id: str | None = None,
+                 output_device: str | None = None, model: str = "small",
+                 llm_model: str = "qwen3:8b", voice: str = "personal",
+                 voice_profile_id: str | None = None,
                  performance_mode: PerformanceMode = PerformanceMode.BALANCED) -> None:
         self.stop_event = threading.Event()
         self.session = None
@@ -67,6 +64,7 @@ class MeetingTakeoverApp:
         self._thread = None
         self._monitor_thread = None
         self._last_result_count = 0
+        self.output_device = output_device
 
         recognizer = FasterWhisperRecognizer(model_size=model, device="auto")
         recognizer.warmup()
@@ -89,38 +87,49 @@ class MeetingTakeoverApp:
             synthesizer.warmup()
             profile_id = voice_profile_id or profile.id
 
-        assistant = AnswerAssistant(translator=OllamaTranslator(model=llm_model))
+        assistant = AnswerAssistant(translator=translator)
         runtime = MeetingTakeoverRuntime(
-            assistant=assistant,
-            synthesizer=synthesizer,
-            config=TakeoverConfig(),
-            voice_profile_id=profile_id,
-        )
+            assistant=assistant, synthesizer=synthesizer,
+            config=TakeoverConfig(), voice_profile_id=profile_id)
         runtime.arm()
 
-        self.session = TranslationSession(
-            recognizer=recognizer,
-            translator=translator,
-            synthesizer=synthesizer,
-            vad=EnergyVad(),
-            config=SessionConfig(
+        if os.name == "nt":
+            from .windows_session import WindowsSessionConfig, WindowsTranslationSession
+            if not output_device:
+                raise RuntimeError("Windows meeting mode requires --output-device")
+            session_config = WindowsSessionConfig(
                 input_device=input_device,
+                virtual_output_device=output_device,
                 performance_mode=performance_mode,
                 voice_profile_id=profile_id,
                 use_virtual_mic=True,
-            ),
-        )
+            )
+            self.session = WindowsTranslationSession(
+                recognizer=recognizer, translator=translator,
+                synthesizer=synthesizer, vad=EnergyVad(), config=session_config)
+        else:
+            self.session = TranslationSession(
+                recognizer=recognizer, translator=translator,
+                synthesizer=synthesizer, vad=EnergyVad(),
+                config=SessionConfig(
+                    input_device=input_device, performance_mode=performance_mode,
+                    voice_profile_id=profile_id, use_virtual_mic=True))
         self.runtime = runtime
         self.remote_input_device = remote_input_device
 
     def start(self) -> None:
         self.session.start()
-        self._remote = PulseCaptureStream(
-            device=self.remote_input_device,
-            sample_rate=16000,
-            frame_ms=20,
-            stream_name="takeover-remote-in",
-        )
+        if os.name == "nt":
+            from ..audio.backend.windows_backend import WindowsCaptureStream
+            self._remote = WindowsCaptureStream(
+                device=self.remote_input_device, sample_rate=16000,
+                frame_ms=20, stream_name="takeover-remote-in",
+                include_loopback=True)
+        else:
+            from ..audio.backend.pulse_backend import PulseCaptureStream
+            self._remote = PulseCaptureStream(
+                device=self.remote_input_device, sample_rate=16000,
+                frame_ms=20, stream_name="takeover-remote-in")
         self._thread = threading.Thread(target=self._remote_loop,
                                          name="vaani-takeover-remote", daemon=True)
         self._monitor_thread = threading.Thread(target=self._user_signal_loop,
@@ -145,8 +154,7 @@ class MeetingTakeoverApp:
         recognizer = self.session.pipeline.recognizer
         segmenter = UtteranceSegmenter(
             config=SegmenterConfig.for_mode(self.session.config.performance_mode),
-            sample_rate=16000, frame_ms=20,
-        )
+            sample_rate=16000, frame_ms=20)
         vad = EnergyVad()
         while not self.stop_event.is_set():
             try:
@@ -164,13 +172,10 @@ class MeetingTakeoverApp:
             if not looks_like_question(text):
                 continue
             self.runtime.observe_remote_question(text)
-            # Explicit takeover phrases are evaluated through the same policy.
             if any(p in text.lower() for p in self.runtime.controller.config.explicit_phrases):
-                response = self.runtime.respond_if_authorized()
-                self._emit_response(response)
+                self._emit_response(self.runtime.respond_if_authorized())
 
     def _user_signal_loop(self) -> None:
-        """Feed already-transcribed user utterances into the takeover policy."""
         while not self.stop_event.is_set():
             results = self.session.results
             if self._last_result_count < len(results):
@@ -180,8 +185,7 @@ class MeetingTakeoverApp:
                         self.runtime.observe_user_speech(
                             text, hesitation=looks_hesitant(text))
                 self._last_result_count = len(results)
-            response = self.runtime.respond_if_authorized()
-            self._emit_response(response)
+            self._emit_response(self.runtime.respond_if_authorized())
             time.sleep(0.1)
 
     def _emit_response(self, response) -> None:
@@ -197,9 +201,11 @@ class MeetingTakeoverApp:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Vaani meeting takeover")
-    parser.add_argument("--input", help="your physical microphone source")
+    parser.add_argument("--input", help="your physical microphone device name")
     parser.add_argument("--remote-input", required=True,
-                        help="meeting/remote-audio source; use `vaani devices --all`")
+                        help="meeting speaker loopback/remote-audio device name")
+    parser.add_argument("--output-device",
+                        help="Windows virtual-cable playback endpoint used as meeting mic feed")
     parser.add_argument("--model", default="small")
     parser.add_argument("--llm-model", default="qwen3:8b")
     parser.add_argument("--voice", choices=["personal", "fallback"], default="personal")
@@ -207,13 +213,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     app = MeetingTakeoverApp(
-        input_device=args.input,
-        remote_input_device=args.remote_input,
-        model=args.model,
-        llm_model=args.llm_model,
-        voice=args.voice,
-        performance_mode=PerformanceMode(args.mode),
-    )
+        input_device=args.input, remote_input_device=args.remote_input,
+        output_device=args.output_device, model=args.model,
+        llm_model=args.llm_model, voice=args.voice,
+        performance_mode=PerformanceMode(args.mode))
     print("Vaani meeting takeover armed.")
     print("Explicit command: say 'Vaani, take over'.")
     print("Automatic handoff requires the configured hesitation/silence policy.")
