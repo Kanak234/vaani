@@ -28,7 +28,7 @@ cuda = [
 ]
 # Native Windows audio: WASAPI microphones, speakers, and loopback capture.
 windows = [
-    "soundcard>=0.4.4",
+    "soundcard>=0.4.6",
 ]
 all = [
     "vaani[stt,translate,voice,cuda,windows]",
