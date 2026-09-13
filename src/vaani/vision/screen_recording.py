@@ -1,12 +1,9 @@
-"""Local screen-recording analysis using OpenCV + a local Ollama vision model.
-
-The analyzer samples frames from a recording, sends only those local images to
-Ollama, and returns a compact visual/context report. No recording is uploaded.
-"""
+"""Local screen-recording analysis using OpenCV + a local Ollama vision model."""
 from __future__ import annotations
 
 import base64
 import json
+import os
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,13 +21,14 @@ class RecordingAnalysis:
 
 
 def _ollama_chat(model: str, prompt: str, images: list[str]) -> str:
+    host = os.environ.get("VAANI_OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
     payload = json.dumps({
         "model": model,
         "stream": False,
         "messages": [{"role": "user", "content": prompt, "images": images}],
     }).encode("utf-8")
     req = urllib.request.Request(
-        "http://127.0.0.1:11434/api/chat",
+        f"{host}/api/chat",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
