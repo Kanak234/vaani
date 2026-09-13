@@ -41,6 +41,13 @@ if (!(Test-Path $releaseDir)) {
 & $pyinstaller --noconfirm --onedir --windowed `
     --name vaani `
     --add-data "$workspace\packaging\vaani.svg;packaging" `
+    --hidden-import vaani.system.hardware `
+    --hidden-import vaani.system.platform `
+    --hidden-import vaani.system.profile `
+    --hidden-import vaani.system.ollama_manager `
+    --hidden-import vaani.ui.windows_console `
+    --hidden-import vaani.audio.backend.windows_backend `
+    --hidden-import vaani.devices.windows_manager `
     --distpath $releaseDir `
     "$workspace\src\vaani\ui\__main__.py"
 

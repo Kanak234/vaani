@@ -122,8 +122,11 @@ class WindowsReliableMeetingRuntime:
     def stop(self) -> None:
         self._app.stop()
         if self._cpu_ollama_process is not None:
-            self._cpu_ollama_process.terminate()
-            self._cpu_ollama_process.wait(timeout=5.0)
+            try:
+                self._cpu_ollama_process.terminate()
+                self._cpu_ollama_process.wait(timeout=5.0)
+            except (subprocess.TimeoutExpired, OSError):
+                self._cpu_ollama_process.kill()
 
     def emergency_stop(self) -> None:
         self._app.stop_event.set()

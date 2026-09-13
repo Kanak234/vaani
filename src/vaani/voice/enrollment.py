@@ -207,7 +207,10 @@ class VoiceProfileStore:
     def __init__(self, root: Path | None = None,
                  ledger: ConsentLedger | None = None) -> None:
         self.root = root or _default_root()
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         self.ledger = ledger or ConsentLedger()
 
     def create(self, *, name: str, audio: np.ndarray, sample_rate: int,

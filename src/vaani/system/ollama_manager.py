@@ -167,7 +167,17 @@ class OllamaManager:
     def stop(self) -> None:
         with self._lock:
             if self._cpu_process:
-                self._cpu_process.terminate()
-                self._cpu_process.wait(timeout=5)
+                try:
+                    self._cpu_process.terminate()
+                    self._cpu_process.wait(timeout=5)
+                except (subprocess.TimeoutExpired, OSError):
+                    self._cpu_process.kill()
                 self._cpu_process = None
                 self._active_host = self.primary_host
+
+    def __del__(self) -> None:
+        if hasattr(self, '_cpu_process') and self._cpu_process:
+            try:
+                self._cpu_process.kill()
+            except Exception:
+                pass

@@ -32,6 +32,7 @@ mkdir -p "$BUILD_DIR/$PKG_NAME/opt/vaani"
 cp -r "$HERE/src" "$BUILD_DIR/$PKG_NAME/opt/vaani/"
 cp "$HERE/pyproject.toml" "$BUILD_DIR/$PKG_NAME/opt/vaani/"
 cp "$HERE/LICENSE" "$BUILD_DIR/$PKG_NAME/opt/vaani/" 2>/dev/null || true
+find "$BUILD_DIR/$PKG_NAME/opt/vaani" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
 # Desktop & Icon
 mkdir -p "$BUILD_DIR/$PKG_NAME/usr/share/applications"

@@ -99,7 +99,10 @@ class ConsentLedger:
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or _default_path()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
 
     def grant(self, *, subject_label: str, confirmation: str,
               app_version: str, is_self_attested: bool = True) -> ConsentRecord:
