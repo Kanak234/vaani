@@ -1,21 +1,13 @@
-"""Windows audio streams backed by WASAPI through the ``soundcard`` package.
-
-Windows has no libpulse/pactl audio server, so the Linux Pulse backend cannot be
-used here. ``soundcard`` exposes Windows microphones, speakers, and WASAPI
-loopback microphones through the native Windows audio stack.
-
-The stream contract matches the Pulse backend: mono float32 samples, 16 kHz,
-blocking frame-oriented I/O.
-"""
+"""Windows audio streams backed by WASAPI through the ``soundcard`` package."""
 from __future__ import annotations
 
 import threading
+import warnings
 
 import numpy as np
 
 from ...core.errors import ErrorCode, Severity, VaaniError
 
-_INT16_SCALE = 32768.0
 
 
 def _load_soundcard():
@@ -57,7 +49,13 @@ def _match(devices, requested: str | None, kind: str):
 
 
 class WindowsCaptureStream:
-    """Blocking mono capture from a Windows microphone or WASAPI loopback."""
+    """Blocking mono capture from a Windows microphone or WASAPI loopback.
+
+    Media Foundation/WASAPI can report timestamp discontinuities when another
+    application changes an endpoint or the scheduler briefly falls behind. The
+    soundcard package reports those as warnings rather than failed reads; they
+    are not allowed to spam the meeting console or terminate the stream.
+    """
 
     def __init__(self, *, device: str | None = None, sample_rate: int = 16000,
                  frame_ms: int = 20, stream_name: str = "capture",
@@ -106,7 +104,10 @@ class WindowsCaptureStream:
                                  message="capture stream is closed",
                                  severity=Severity.SESSION)
             try:
-                data = self._recorder.record(numframes=self.frame_samples)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore", message="data discontinuity in recording")
+                    data = self._recorder.record(numframes=self.frame_samples)
             except Exception as exc:
                 raise VaaniError(code=ErrorCode.DEVICE_DISCONNECTED,
                                  message=f"Windows capture read failed: {exc}",
@@ -115,7 +116,12 @@ class WindowsCaptureStream:
         samples = np.asarray(data, dtype=np.float32)
         if samples.ndim == 2:
             samples = samples.mean(axis=1)
-        return samples.reshape(-1)
+        samples = samples.reshape(-1)
+        if samples.size == 0:
+            raise VaaniError(code=ErrorCode.DEVICE_DISCONNECTED,
+                             message="Windows capture returned an empty frame",
+                             severity=Severity.SESSION)
+        return samples
 
     def close(self) -> None:
         with self._lock:
@@ -202,9 +208,6 @@ class WindowsPlaybackStream:
         return
 
     def flush(self) -> None:
-        # soundcard does not expose a portable flush primitive. Closing/reopening
-        # would risk dropping the selected endpoint, so emergency_stop relies on
-        # Vaani's output queue being emptied before the next write.
         return
 
     def close(self) -> None:
