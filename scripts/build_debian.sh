@@ -6,7 +6,7 @@ echo "=== Vaani Debian Build Script ==="
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$HERE/build_debian"
 RELEASE_DIR="$HERE/release/debian"
-VERSION="1.0.0"
+VERSION="1.0.1"
 PKG_NAME="vaani_${VERSION}_amd64"
 
 # 1. Check tools

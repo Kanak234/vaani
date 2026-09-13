@@ -1,6 +1,6 @@
 [Setup]
 AppName=Vaani
-AppVersion=1.0.0
+AppVersion=1.0.1
 AppPublisher=Vaani Project
 DefaultDirName={autopf}\Vaani
 DefaultGroupName=Vaani
@@ -19,8 +19,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "..\..\release\windows\vaani\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Vaani"; Filename: "{app}\vaani.exe"
-Name: "{autodesktop}\Vaani"; Filename: "{app}\vaani.exe"; Tasks: desktopicon
+Name: "{group}\Vaani"; Filename: "{app}\vaani.exe"; IconFilename: "{app}\packaging\vaani.ico"
+Name: "{autodesktop}\Vaani"; Filename: "{app}\vaani.exe"; IconFilename: "{app}\packaging\vaani.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\vaani.exe"; Description: "{cm:LaunchProgram,Vaani}"; Flags: nowait postinstall skipifsilent

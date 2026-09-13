@@ -23,16 +23,45 @@ jobs:
           python-version: '3.12'
 
       - name: Install Inno Setup
+        shell: powershell
         run: |
           choco install innosetup --no-progress
+          $isccDir = "C:\Program Files (x86)\Inno Setup 6"
+          if (Test-Path $isccDir) {
+              echo "$isccDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
 
       - name: Run Windows Build Script
         shell: powershell
         run: |
           .\scripts\build_windows.ps1
 
-      - name: Upload Windows Build Artifacts
+      - name: Verify Windows Release Artifacts
+        shell: powershell
+        run: |
+          $exe = "release\windows\vaani\vaani.exe"
+          $installer = "release\windows\vaani_installer.exe"
+
+          if (!(Test-Path $exe)) {
+              Write-Error "CRITICAL: $exe was not generated!"
+              exit 1
+          }
+          if (!(Test-Path $installer)) {
+              Write-Error "CRITICAL: $installer was not generated!"
+              exit 1
+          }
+          Write-Host "Verified existence of $exe ($(Get-Item $exe).Length bytes)"
+          Write-Host "Verified existence of $installer ($(Get-Item $installer).Length bytes)"
+
+      - name: Smoke Test Python Import & CLI on Windows
+        shell: powershell
+        run: |
+          python -m venv .ci_test_venv
+          .\.ci_test_venv\Scripts\python.exe -m pip install -e ".[stt,translate,windows]"
+          .\.ci_test_venv\Scripts\python.exe -m vaani --help
+
+      - name: Upload Windows Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vaani-windows-release
+          name: vaani-windows-v1.0.1
           path: release/windows/
