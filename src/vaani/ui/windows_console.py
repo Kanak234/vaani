@@ -8,7 +8,6 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from ..core.types import PerformanceMode
-from ..session.meeting_takeover_app import MeetingTakeoverApp
 from ..vision.screen_recording import analyze_recording, _ollama_chat
 
 MIC_DEFAULT = "Microphone (HP USB Sound Device)"
@@ -103,17 +102,25 @@ class WindowsVaaniConsole(tk.Tk):
     def start_meeting(self) -> None:
         if self._meeting is not None:
             return
-        self.status.set("Starting local STT/LLM/TTS + audio routing…")
+        self.status.set("Starting verified CPU STT + local Ollama…")
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         threading.Thread(target=self._start_worker, daemon=True).start()
 
     def _start_worker(self) -> None:
         try:
-            app = MeetingTakeoverApp(input_device=self.mic.get(), remote_input_device=self.remote.get(), output_device=self.output.get(), llm_model=self.model.get().strip() or "qwen3:8b", voice=self.voice.get(), performance_mode=PerformanceMode.LOW_LATENCY)
-            self._meeting = app
+            from ..session.windows_runtime import WindowsReliableMeetingRuntime
+            app = WindowsReliableMeetingRuntime(
+                input_device=self.mic.get(),
+                remote_input_device=self.remote.get(),
+                output_device=self.output.get(),
+                llm_model=self.model.get().strip() or "qwen3:8b",
+                voice=self.voice.get(),
+                performance_mode=PerformanceMode.LOW_LATENCY,
+            )
             app.start()
-            self.after(0, lambda: self.status.set("ARMED + ACTIVE — listening for questions / hesitation"))
+            self._meeting = app
+            self.after(0, lambda: self.status.set("ARMED + ACTIVE — verified CPU path"))
             self.after(0, lambda: self.meeting_log.insert("end", "\nMeeting takeover is running.\n"))
         except Exception as exc:
             self._meeting = None
@@ -172,9 +179,12 @@ class WindowsVaaniConsole(tk.Tk):
 
     def _response_worker(self) -> None:
         try:
+            from ..session.windows_runtime import ensure_cpu_ollama
             instruction = self.response_instruction.get("1.0", "end").strip()
+            model = self.model.get().strip() or "qwen3:8b"
+            os.environ["VAANI_OLLAMA_HOST"] = ensure_cpu_ollama(model)
             prompt = ("You are Vaani, a local meeting assistant. Draft one concise spoken response based only on the visual context below. Preserve uncertainty and never invent facts, commitments, names, dates, or numbers. Output only the response.\n\n" f"Instruction: {instruction}\n\nVisual context:\n{self._analysis.report}")
-            response = _ollama_chat(self.model.get().strip() or "qwen3:8b", prompt, [])
+            response = _ollama_chat(model, prompt, [])
             if not response:
                 raise RuntimeError("The local language model returned an empty response.")
             self._response = response
