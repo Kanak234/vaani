@@ -2,15 +2,13 @@
 
 The target Windows machine has a verified CPU Ollama path while the default
 CUDA runner is currently crashing. This module keeps the desktop application
-usable by running a private, loopback-only CPU Ollama server on a separate port
-instead of depending on the unstable default server.
+usable by running a private, loopback-only CPU Ollama server on a separate port.
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
-import socket
 import subprocess
 import time
 
@@ -76,55 +74,25 @@ def ensure_cpu_ollama(model: str, *, timeout_s: float = 30.0) -> str:
 
 
 class WindowsReliableMeetingRuntime:
-    """Windows meeting runtime using the verified CPU STT + CPU Ollama path."""
+    """MeetingTakeoverApp configured for the verified Windows CPU path."""
 
     def __init__(self, *, input_device: str, remote_input_device: str,
                  output_device: str, llm_model: str, voice: str = "fallback",
                  performance_mode=None) -> None:
-        import threading
-        from ..ai.assist import AnswerAssistant
-        from ..ai.stt.whisper import FasterWhisperRecognizer
-        from ..ai.tts.fallback import FallbackSynthesizer
-        from ..ai.translate.ollama import OllamaTranslator
-        from ..ai.vad.energy import EnergyVad
         from ..core.types import PerformanceMode
         from .meeting_takeover_app import MeetingTakeoverApp
 
         if os.name != "nt":
             raise RuntimeError("WindowsReliableMeetingRuntime is Windows-only")
-        mode = performance_mode or PerformanceMode.LOW_LATENCY
         host = ensure_cpu_ollama(llm_model)
-        recognizer = FasterWhisperRecognizer(
-            model_size="small", device="cpu", compute_type="int8", beam_size=1)
-        recognizer.warmup()
-        translator = OllamaTranslator(host=host, model=llm_model)
-        translator.warmup()
-        synthesizer = FallbackSynthesizer()
-        profile_id = None
-
-        if voice == "personal":
-            from ..ai.tts.xtts import XttsSynthesizer
-            from ..voice.consent import ConsentLedger
-            from ..voice.enrollment import VoiceProfileStore
-            store, ledger = VoiceProfileStore(), ConsentLedger()
-            profile = store.active()
-            if profile is None:
-                raise RuntimeError("No active voice profile is available.")
-            if not ledger.has_active_consent():
-                raise RuntimeError("Voice consent is not active.")
-            synthesizer = XttsSynthesizer(profile_store=store, consent_ledger=ledger)
-            synthesizer.warmup()
-            profile_id = profile.id
-
         self._app = MeetingTakeoverApp(
             input_device=input_device,
             remote_input_device=remote_input_device,
             output_device=output_device,
             model="small",
             llm_model=llm_model,
-            voice="fallback" if voice != "personal" else "personal",
-            voice_profile_id=profile_id,
-            performance_mode=mode,
+            voice=voice,
+            performance_mode=performance_mode or PerformanceMode.LOW_LATENCY,
             ollama_host=host,
             stt_device="cpu",
             stt_compute_type="int8",
