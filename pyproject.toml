@@ -26,13 +26,19 @@ cuda = [
     "nvidia-cublas-cu12",
     "nvidia-cudnn-cu12",
 ]
-# Native Windows audio: WASAPI microphones, speakers, and loopback capture.
 windows = [
     "soundcard>=0.4.6",
 ]
-all = [
-    "vaani[stt,translate,voice,cuda,windows]",
+screen = [
+    "opencv-python>=4.10",
 ]
+all = [
+    "vaani[stt,translate,voice,cuda,windows,screen]",
+]
+
+[project.scripts]
+vaani = "vaani.cli:main"
+vaani-windows = "vaani.ui.windows_console:main"
 
 [build-system]
 requires = ["hatchling"]
