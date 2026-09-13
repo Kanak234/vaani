@@ -20,6 +20,7 @@ from typing import Any
 
 from ..core.errors import ErrorCode, Severity, VaaniError
 from ..core.types import UtteranceResult
+from ..system.platform import data_dir, is_windows
 from .schema import SCHEMA_VERSION, apply_migrations
 
 
@@ -54,7 +55,7 @@ class Database:
         # Off by default in SQLite; without it the ON DELETE rules are decorative.
         self._conn.execute("PRAGMA foreign_keys = ON")
         apply_migrations(self._conn)
-        if self.path.exists():
+        if self.path.exists() and not is_windows():
             os.chmod(self.path, 0o600)     # may contain transcripts
 
     @property
@@ -81,7 +82,7 @@ class Database:
 
     def start_session(self, *, mode: str, performance_mode: str = "balanced",
                       source_language_mode: str = "auto", target_language: str = "en",
-                      voice_profile_id: int | None = None,
+                      voice_profile_id: str | None = None,
                       input_device_id: str | None = None,
                       output_device_id: str | None = None,
                       local_only: bool = False,
@@ -297,5 +298,4 @@ def _redact(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _default_path() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "vaani" / "vaani.db"
+    return data_dir() / "vaani.db"

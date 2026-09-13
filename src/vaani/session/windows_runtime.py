@@ -17,12 +17,19 @@ CPU_OLLAMA_PORT = 11435
 
 
 def _ollama_executable() -> str:
-    found = shutil.which("ollama")
-    if found:
-        return found
-    candidate = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
-    if os.path.isfile(candidate):
-        return candidate
+    import shutil
+    from pathlib import Path
+    which = shutil.which("ollama")
+    if which:
+        return str(Path(which))
+    candidates = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe",
+        Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Ollama" / "ollama.exe",
+        Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "Ollama" / "ollama.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
     raise RuntimeError("Ollama executable was not found. Install Ollama before starting Vaani.")
 
 
@@ -38,20 +45,29 @@ def _has_model(host: str, model: str) -> bool:
         names = _tags(host)
     except Exception:
         return False
-    return any(name == model or name.split(":")[0] == model.split(":")[0] for name in names)
+    if model in names:
+        return True
+    model_base = model.split(":")[0]
+    model_tag = model.split(":")[-1] if ":" in model else None
+    for name in names:
+        name_base = name.split(":")[0]
+        name_tag = name.split(":")[-1] if ":" in name else None
+        if model_base == name_base and (model_tag is None or model_tag == name_tag):
+            return True
+    return False
 
 
-def ensure_cpu_ollama(model: str, *, timeout_s: float = 30.0) -> str:
+def ensure_cpu_ollama(model: str, *, timeout_s: float = 30.0):
     """Ensure a loopback-only CPU Ollama endpoint is available for Vaani."""
     if _has_model(CPU_OLLAMA_HOST, model):
-        return CPU_OLLAMA_HOST
+        return CPU_OLLAMA_HOST, None
 
     exe = _ollama_executable()
     env = os.environ.copy()
     env["OLLAMA_HOST"] = f"127.0.0.1:{CPU_OLLAMA_PORT}"
     env["OLLAMA_LLM_LIBRARY"] = "cpu_avx2"
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    subprocess.Popen(
+    proc = subprocess.Popen(
         [exe, "serve"], env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=creationflags,
@@ -62,11 +78,12 @@ def ensure_cpu_ollama(model: str, *, timeout_s: float = 30.0) -> str:
     while time.monotonic() < deadline:
         try:
             if _has_model(CPU_OLLAMA_HOST, model):
-                return CPU_OLLAMA_HOST
+                return CPU_OLLAMA_HOST, proc
         except Exception as exc:
             last_error = exc
         time.sleep(0.25)
 
+    proc.kill()
     raise RuntimeError(
         f"Could not start the private CPU Ollama endpoint at {CPU_OLLAMA_HOST}; "
         f"model {model!r} is not available there."
@@ -84,7 +101,8 @@ class WindowsReliableMeetingRuntime:
 
         if os.name != "nt":
             raise RuntimeError("WindowsReliableMeetingRuntime is Windows-only")
-        host = ensure_cpu_ollama(llm_model)
+        host, proc = ensure_cpu_ollama(llm_model)
+        self._cpu_ollama_process = proc
         self._app = MeetingTakeoverApp(
             input_device=input_device,
             remote_input_device=remote_input_device,
@@ -103,12 +121,24 @@ class WindowsReliableMeetingRuntime:
 
     def stop(self) -> None:
         self._app.stop()
+        if self._cpu_ollama_process is not None:
+            self._cpu_ollama_process.terminate()
+            self._cpu_ollama_process.wait(timeout=5.0)
 
     def emergency_stop(self) -> None:
         self._app.stop_event.set()
         if self._app.session is not None:
             self._app.session.emergency_stop()
+        if self._cpu_ollama_process is not None:
+            self._cpu_ollama_process.kill()
 
     @property
     def session(self):
         return self._app.session
+
+    def __del__(self):
+        if hasattr(self, '_cpu_ollama_process') and self._cpu_ollama_process is not None:
+            try:
+                self._cpu_ollama_process.kill()
+            except Exception:
+                pass

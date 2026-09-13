@@ -55,8 +55,15 @@ class CaptureStream:
         return f"{self.app_name} (#{self.index})"
 
 
+import logging
+logger = logging.getLogger(__name__)
+
+_ROUTING_AVAILABLE = os.name != "nt"
+
 def _virtual_mic_source_ids() -> set[str]:
     ids: set[str] = set()
+    if not _ROUTING_AVAILABLE:
+        return ids
     try:
         out = _pactl("list", "short", "sources")
     except VaaniError:
@@ -76,6 +83,8 @@ def _is_vaani_stream(props: dict[str, str]) -> bool:
 
 def list_capture_streams() -> list[CaptureStream]:
     """Every application currently capturing from a microphone."""
+    if not _ROUTING_AVAILABLE:
+        return []
     try:
         out = _pactl("list", "source-outputs")
     except VaaniError:
@@ -122,6 +131,9 @@ def streams_on_virtual_mic() -> list[CaptureStream]:
 
 def move_to_virtual_mic(stream: CaptureStream) -> None:
     """Reassign one application's microphone to Vaani's virtual mic."""
+    if not _ROUTING_AVAILABLE:
+        logger.warning("Routing operations are not available on this platform.")
+        return
     if stream.is_own:
         raise VaaniError(
             code=ErrorCode.FEEDBACK_LOOP_DETECTED,
@@ -143,11 +155,17 @@ def move_to_virtual_mic(stream: CaptureStream) -> None:
 
 def move_back(stream: CaptureStream, source_name: str) -> None:
     """Return an application to a real microphone."""
+    if not _ROUTING_AVAILABLE:
+        return
     _pactl("move-source-output", stream.index, source_name)
 
 
 def _state_path() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/vaani-{os.getuid()}"
+    if not _ROUTING_AVAILABLE:
+        import tempfile
+        base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    else:
+        base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/vaani-{os.getuid()}"
     return Path(base) / "vaani-routing.json"
 
 
@@ -165,6 +183,8 @@ def reclaim_orphaned_routing(fallback_source: str | None = None) -> int:
     the worst kind of failure to leave behind, so recovery cannot depend on a
     clean shutdown.
     """
+    if not _ROUTING_AVAILABLE:
+        return 0
     path = _state_path()
     if not path.exists():
         return 0
@@ -226,6 +246,8 @@ class AutoRouter:
 
     def sweep(self) -> list[CaptureStream]:
         """Move any newly-appeared capture stream. Returns what was moved."""
+        if not _ROUTING_AVAILABLE:
+            return []
         moved_now: list[CaptureStream] = []
         for stream in list_capture_streams():
             if not stream.movable or stream.index in self.moved:
@@ -248,6 +270,8 @@ class AutoRouter:
         virtual microphone that no longer carries anything, and the user would
         appear muted in their next call with no obvious cause.
         """
+        if not _ROUTING_AVAILABLE:
+            return 0
         target = fallback_source or self.real_source
         restored = 0
         for index, original in list(self.moved.items()):

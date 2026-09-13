@@ -54,12 +54,13 @@ class LatencyMonitor:
     cooldown_s: float = 60.0
 
     _samples: deque = field(init=False, repr=False)
-    _stage_totals: dict = field(default_factory=dict, init=False, repr=False)
+    _stage_samples: deque = field(init=False, repr=False)
     _last_warned: float = field(default=0.0, init=False)
     _budget: float = field(init=False)
 
     def __post_init__(self) -> None:
         self._samples = deque(maxlen=max(1, self.window))
+        self._stage_samples = deque(maxlen=max(1, self.window))
         self._budget = BUDGET_MS[self.mode]
 
     @property
@@ -76,11 +77,11 @@ class LatencyMonitor:
             return None
 
         self._samples.append(result.total_latency_ms)
+        stage_timing = {}
         for timing in result.timings:
             if timing.succeeded:
-                acc = self._stage_totals.setdefault(timing.stage, [0.0, 0])
-                acc[0] += timing.duration_ms
-                acc[1] += 1
+                stage_timing[timing.stage] = timing.duration_ms
+        self._stage_samples.append(stage_timing)
 
         if len(self._samples) < self.min_samples:
             return None
@@ -102,12 +103,23 @@ class LatencyMonitor:
 
     def slowest_stage(self) -> tuple[str | None, float]:
         """Mean duration of the slowest stage — what to actually fix."""
-        if not self._stage_totals:
+        if not self._stage_samples:
             return None, 0.0
-        stage, (total, count) = max(
-            self._stage_totals.items(),
-            key=lambda kv: kv[1][0] / max(1, kv[1][1]))
-        return stage, total / max(1, count)
+
+        totals = {}
+        counts = {}
+        for sample in self._stage_samples:
+            for stage, duration in sample.items():
+                totals[stage] = totals.get(stage, 0.0) + duration
+                counts[stage] = counts.get(stage, 0) + 1
+
+        if not totals:
+            return None, 0.0
+
+        stage, total = max(
+            totals.items(),
+            key=lambda kv: kv[1] / max(1, counts[kv[0]]))
+        return stage, total / max(1, counts[stage])
 
     def percentiles(self) -> dict[str, float]:
         if not self._samples:
@@ -122,5 +134,5 @@ class LatencyMonitor:
 
     def reset(self) -> None:
         self._samples.clear()
-        self._stage_totals.clear()
+        self._stage_samples.clear()
         self._last_warned = 0.0

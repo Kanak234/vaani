@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.0",
     "soundfile>=0.13",
+    "soundcard>=0.4.2",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]

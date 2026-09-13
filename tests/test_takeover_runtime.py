@@ -39,7 +39,7 @@ def test_runtime_speaks_after_hesitation_timeout():
     runtime.observe_user_speech("um", hesitation=True, now=10.5)
     runtime.observe_user_speech("uh", hesitation=True, now=11.0)
 
-    response = runtime.respond_if_authorized(now=14.0)
+    response = runtime.respond_if_authorized(now=16.0)
 
     assert response is not None
     assert response.question == "Can you explain the approach?"

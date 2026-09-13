@@ -196,8 +196,6 @@ class MeetingTakeoverApp:
             if not looks_like_question(text):
                 continue
             self.runtime.observe_remote_question(text)
-            if any(p in text.lower() for p in self.runtime.controller.config.explicit_phrases):
-                self._emit_response(self.runtime.respond_if_authorized())
 
     def _user_signal_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -208,6 +206,8 @@ class MeetingTakeoverApp:
                         text = result.transcript.text
                         self.runtime.observe_user_speech(
                             text, hesitation=looks_hesitant(text))
+                        if any(p in text.lower() for p in self.runtime.controller.config.explicit_phrases):
+                            self._emit_response(self.runtime.respond_if_authorized())
                 self._last_result_count = len(results)
             self._emit_response(self.runtime.respond_if_authorized())
             time.sleep(0.1)
@@ -217,7 +217,7 @@ class MeetingTakeoverApp:
             return
         if not self.session.sm.can_emit_audio or self.stop_event.is_set():
             return
-        self.session._out_queue.put(response.audio.samples)
+        self.session.inject_audio(response.audio.samples)
         print(f"[TAKEOVER] {response.question}")
         print(f"          -> {response.text}")
         print(f"          reason={response.reason}")

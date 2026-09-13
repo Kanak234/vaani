@@ -47,7 +47,8 @@ def test_substantive_user_answer_prevents_automatic_takeover() -> None:
     )
 
     assert decision.action is TakeoverAction.USER
-    assert controller.poll(now=110.0).action is TakeoverAction.WAIT
+    # Poll at 105s (4s after user speech) — within normal silence window
+    assert controller.poll(now=105.0).action is TakeoverAction.WAIT
 
 
 def test_stop_disables_active_takeover() -> None:

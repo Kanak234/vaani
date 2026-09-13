@@ -163,12 +163,15 @@ class MeetingTakeoverController:
 
         current = time.monotonic() if now is None else now
         silence = current - max(self.last_question_time, self.last_user_activity)
-        if (
+        extended_silence = silence >= self.config.silence_after_question_s * 2.0
+        normal_handoff = (
             silence >= self.config.silence_after_question_s
             and self.hesitation_events >= self.config.min_hesitation_events
-        ):
+        )
+        if normal_handoff or extended_silence:
             self.state = TakeoverState.ACTIVE
-            return TakeoverDecision(TakeoverAction.TAKEOVER, "hesitation_timeout")
+            reason = "extended_silence" if extended_silence and not normal_handoff else "hesitation_timeout"
+            return TakeoverDecision(TakeoverAction.TAKEOVER, reason)
         return TakeoverDecision(TakeoverAction.WAIT, "user_still_has_turn")
 
     def consume_question(self) -> str | None:

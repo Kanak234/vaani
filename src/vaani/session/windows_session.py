@@ -55,3 +55,29 @@ class WindowsTranslationSession(TranslationSession):
         self._capture = WindowsCaptureStream(
             device=self.config.input_device, sample_rate=SAMPLE_RATE,
             frame_ms=FRAME_MS, stream_name="mic-in")
+
+    def _enqueue_chunk(self, chunk) -> None:
+        from ..audio.backend.windows_backend import _ensure_sample_rate
+        src_rate = getattr(self.pipeline.synthesizer, 'sample_rate', 16000)
+        if src_rate != SAMPLE_RATE:
+            chunk = _ensure_sample_rate(chunk, src_rate, SAMPLE_RATE)
+        super()._enqueue_chunk(chunk)
+
+    def inject_audio(self, samples) -> None:
+        from ..audio.backend.windows_backend import _ensure_sample_rate
+        src_rate = getattr(self.pipeline.synthesizer, 'sample_rate', 16000)
+        if src_rate != SAMPLE_RATE:
+            samples = _ensure_sample_rate(samples, src_rate, SAMPLE_RATE)
+        super().inject_audio(samples)
+
+    def _close_devices(self) -> None:
+        for stream in (self._capture, self._sink, self._monitor):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+        self._capture = self._sink = self._monitor = None
+        if getattr(self, "_virtual_mic", None) is not None:
+            self._virtual_mic.destroy()
+            self._virtual_mic = None

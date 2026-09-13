@@ -41,19 +41,42 @@ def _sc():
                          severity=Severity.FATAL, cause=exc) from exc
 
 
+_VIRTUAL_CABLE_PATTERNS = ('cable', 'vb-audio', 'virtual audio', 'voicemeeter', 'blackhole')
+
+def _is_virtual_device(name: str) -> bool:
+    lower = name.lower()
+    return any(p in lower for p in _VIRTUAL_CABLE_PATTERNS)
+
 def list_sources(*, include_monitors: bool = False) -> list[AudioDevice]:
     sc = _sc()
-    return [AudioDevice(key=d.name, display_name=d.name, kind=DeviceKind.INPUT,
-                        channels=1, sample_rate=16000,
-                        is_monitor=getattr(d, "isloopback", False))
-            for d in sc.all_microphones(include_loopback=include_monitors)]
-
+    out = []
+    for d in sc.all_microphones(include_loopback=include_monitors):
+        # API may not expose channels/samplerate; use defaults if absent
+        ch = getattr(d, "channels", 1)
+        if type(ch) is list: ch = len(ch)
+        sr = getattr(d, "samplerate", 16000)
+        is_loop = getattr(d, "isloopback", False) or "loopback" in d.name.lower()
+        out.append(AudioDevice(
+            key=d.name, display_name=d.name, kind=DeviceKind.INPUT,
+            channels=ch if isinstance(ch, int) else 1, sample_rate=sr,
+            is_virtual=_is_virtual_device(d.name),
+            is_monitor=is_loop
+        ))
+    return out
 
 def list_sinks() -> list[AudioDevice]:
     sc = _sc()
-    return [AudioDevice(key=d.name, display_name=d.name, kind=DeviceKind.OUTPUT,
-                        channels=2, sample_rate=48000)
-            for d in sc.all_speakers()]
+    out = []
+    for d in sc.all_speakers():
+        ch = getattr(d, "channels", 2)
+        if type(ch) is list: ch = len(ch)
+        sr = getattr(d, "samplerate", 48000)
+        out.append(AudioDevice(
+            key=d.name, display_name=d.name, kind=DeviceKind.OUTPUT,
+            channels=ch if isinstance(ch, int) else 2, sample_rate=sr,
+            is_virtual=_is_virtual_device(d.name),
+        ))
+    return out
 
 
 def assert_no_feedback_loop(input_device_key: str, virtual_mic_name: str) -> None:
@@ -80,9 +103,16 @@ class VirtualMicrophone:
     @classmethod
     def create(cls, *, reuse_existing: bool = True, sink_name: str | None = None):
         if not sink_name:
-            raise VaaniError(code=ErrorCode.VIRTUAL_MIC_CREATE_FAILED,
-                             message="Windows requires a virtual audio cable output device; pass its playback endpoint as the Vaani virtual output",
-                             severity=Severity.SESSION)
+            for d in list_sinks():
+                if d.is_virtual:
+                    sink_name = d.key
+                    break
+        if not sink_name:
+            raise VaaniError(
+                code=ErrorCode.VIRTUAL_MIC_CREATE_FAILED,
+                message="Virtual audio cable not detected. Install VB-CABLE or similar.",
+                severity=Severity.SESSION
+            )
         return cls(sink_name=sink_name)
 
     @staticmethod

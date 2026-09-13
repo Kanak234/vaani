@@ -46,6 +46,13 @@ def _match(devices, requested: str | None, kind: str):
         severity=Severity.SESSION,
         detail={"device": requested},
     )
+def _ensure_sample_rate(samples: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    if source_rate == target_rate:
+        return samples
+    n_samples = int(len(samples) * target_rate / source_rate)
+    x = np.arange(len(samples))
+    x_new = np.linspace(0, len(samples) - 1, n_samples)
+    return np.interp(x_new, x, samples).astype(np.float32)
 
 
 class WindowsCaptureStream:
@@ -75,9 +82,16 @@ class WindowsCaptureStream:
         self.frame_bytes = self.frame_samples * 2
         self._lock = threading.Lock()
         self._recorder = None
+        self._recorder_channels = 1
         try:
-            self._recorder = self._device.recorder(samplerate=sample_rate, channels=1)
-            self._recorder.__enter__()
+            try:
+                self._recorder = self._device.recorder(samplerate=sample_rate, channels=1)
+                self._recorder.__enter__()
+                self._recorder_channels = 1
+            except Exception:
+                self._recorder = self._device.recorder(samplerate=sample_rate, channels=2)
+                self._recorder.__enter__()
+                self._recorder_channels = 2
         except Exception as exc:
             raise VaaniError(
                 code=ErrorCode.MIC_UNAVAILABLE,
@@ -95,7 +109,7 @@ class WindowsCaptureStream:
         return self._recorder is not None
 
     def latency_ms(self) -> float:
-        return 0.0
+        return float(self.frame_ms * 2.0)
 
     def read_frame(self) -> np.ndarray:
         with self._lock:
@@ -161,9 +175,16 @@ class WindowsPlaybackStream:
         self.underruns = 0
         self._lock = threading.Lock()
         self._speaker = None
+        self._speaker_channels = 1
         try:
-            self._speaker = self._device.player(samplerate=sample_rate, channels=1)
-            self._speaker.__enter__()
+            try:
+                self._speaker = self._device.player(samplerate=sample_rate, channels=1)
+                self._speaker.__enter__()
+                self._speaker_channels = 1
+            except Exception:
+                self._speaker = self._device.player(samplerate=sample_rate, channels=2)
+                self._speaker.__enter__()
+                self._speaker_channels = 2
         except Exception as exc:
             raise VaaniError(
                 code=ErrorCode.VIRTUAL_MIC_UNAVAILABLE,
@@ -181,10 +202,12 @@ class WindowsPlaybackStream:
         return self._speaker is not None
 
     def latency_ms(self) -> float:
-        return 0.0
+        return float(self.frame_ms * 2.0)
 
     def write(self, samples: np.ndarray) -> None:
         payload = np.asarray(samples, dtype=np.float32).reshape(-1, 1)
+        if getattr(self, "_speaker_channels", 1) == 2:
+            payload = np.repeat(payload, 2, axis=1)
         payload = np.clip(payload, -1.0, 1.0)
         with self._lock:
             if self._speaker is None:
@@ -205,10 +228,26 @@ class WindowsPlaybackStream:
         self.write(np.zeros(n, dtype=np.float32))
 
     def drain(self) -> None:
-        return
+        import time
+        time.sleep(self.frame_ms / 1000.0)
 
     def flush(self) -> None:
-        return
+        with self._lock:
+            if self._speaker is None:
+                return
+            try:
+                self._speaker.__exit__(None, None, None)
+            except Exception:
+                pass
+            try:
+                self._speaker = self._device.player(samplerate=self.sample_rate, channels=self._speaker_channels)
+                self._speaker.__enter__()
+            except Exception as exc:
+                raise VaaniError(
+                    code=ErrorCode.VIRTUAL_MIC_UNAVAILABLE,
+                    message=f"failed to flush and reopen playback device: {exc}",
+                    severity=Severity.SESSION,
+                ) from exc
 
     def close(self) -> None:
         with self._lock:

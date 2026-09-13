@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..core.errors import ErrorCode, Severity, VaaniError
+from ..system.platform import data_dir
 
 #: Shown verbatim before any enrollment audio is captured. Changing this string
 #: changes its hash, which is intentional -- old consents remain attributable to
@@ -199,5 +200,4 @@ class ConsentLedger:
 
 
 def _default_path() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "vaani" / "consent.jsonl"
+    return data_dir() / "consent.jsonl"

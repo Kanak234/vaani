@@ -30,6 +30,10 @@ class StubLLM:
         self.prompts.append(prompt)
         return self.reply
 
+    def generate_raw(self, prompt, *, model=None):
+        self.prompts.append(prompt)
+        return self.reply
+
 
 class StubSynth:
     def __init__(self):

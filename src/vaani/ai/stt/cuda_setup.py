@@ -32,9 +32,12 @@ import site
 import sys
 from pathlib import Path
 
-#: Load order matters: cuDNN links against cuBLAS.
-_LIB_DIRS = ("nvidia/cublas/lib", "nvidia/cuda_nvrtc/lib", "nvidia/cudnn/lib")
-_PRELOAD = ("libcublas.so.12", "libcublasLt.so.12", "libcudnn.so.9")
+if os.name == "nt":
+    _LIB_DIRS = ("nvidia/cublas/bin", "nvidia/cuda_nvrtc/bin", "nvidia/cudnn/bin")
+    _PRELOAD = ("cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll")
+else:
+    _LIB_DIRS = ("nvidia/cublas/lib", "nvidia/cuda_nvrtc/lib", "nvidia/cudnn/lib")
+    _PRELOAD = ("libcublas.so.12", "libcublasLt.so.12", "libcudnn.so.9")
 
 _done = False
 _result: tuple[bool, str] = (False, "not attempted")
@@ -78,26 +81,44 @@ def ensure_cuda_libraries() -> tuple[bool, str]:
             if d.is_dir():
                 found.append(d)
 
+    if os.name == "nt":
+        nvidia_base = Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA")
+        if nvidia_base.exists():
+            for child in nvidia_base.iterdir():
+                if child.is_dir() and (child / "bin").is_dir():
+                    found.append(child / "bin")
+
     if not found:
         _done, _result = True, ("no pip-installed CUDA libraries found; "
                                 "install nvidia-cublas-cu12 and nvidia-cudnn-cu12 "
                                 "for GPU acceleration")
         return _result
 
-    # Help anything that re-execs or dlopens later in the process.
-    existing = os.environ.get("LD_LIBRARY_PATH", "")
-    parts = [str(d) for d in found] + ([existing] if existing else [])
-    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(parts)
+    if os.name == "nt":
+        if hasattr(os, "add_dll_directory"):
+            for d in found:
+                try:
+                    os.add_dll_directory(str(d))
+                except OSError:
+                    pass
+        existing = os.environ.get("PATH", "")
+        parts = [str(d) for d in found] + ([existing] if existing else [])
+        os.environ["PATH"] = os.pathsep.join(parts)
+    else:
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        parts = [str(d) for d in found] + ([existing] if existing else [])
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(parts)
 
-    # The part that actually works in THIS process: once a soname is loaded into
-    # the global namespace, later dlopen() calls for it resolve immediately.
     loaded, failed = [], []
     for soname in _PRELOAD:
         for d in found:
             candidate = d / soname
             if candidate.exists():
                 try:
-                    ctypes.CDLL(str(candidate), mode=ctypes.RTLD_GLOBAL)
+                    if os.name == "nt":
+                        ctypes.WinDLL(str(candidate))
+                    else:
+                        ctypes.CDLL(str(candidate), mode=ctypes.RTLD_GLOBAL)
                     loaded.append(soname)
                 except OSError as exc:
                     failed.append(f"{soname}: {exc}")

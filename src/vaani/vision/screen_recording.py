@@ -3,10 +3,19 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
+
+# Known vision-capable model families (ordered by preference)
+_VISION_MODEL_PATTERNS = (
+    "qwen3-vl", "qwen2.5-vl", "qwen2-vl", "llava", "moondream",
+    "bakllava", "cogvlm", "minicpm-v", "internvl",
+)
 
 
 @dataclass(slots=True)
@@ -18,10 +27,44 @@ class RecordingAnalysis:
     fps: float
     frames_sampled: int
     report: str
+    model_used: str = ""
+
+
+def _ollama_host() -> str:
+    return os.environ.get("VAANI_OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+
+
+def detect_vision_models(host: str | None = None) -> list[str]:
+    """Query Ollama for installed models that are likely vision-capable."""
+    h = host or _ollama_host()
+    try:
+        req = urllib.request.Request(f"{h}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        names = [m.get("name", "") for m in data.get("models", [])]
+    except Exception:
+        return []
+
+    vision_models: list[str] = []
+    for pattern in _VISION_MODEL_PATTERNS:
+        for name in names:
+            if pattern in name.lower().split(":")[0]:
+                vision_models.append(name)
+    return vision_models
+
+
+def select_vision_model(host: str | None = None) -> str | None:
+    """Select the best available vision model, or None if unavailable."""
+    models = detect_vision_models(host)
+    if models:
+        _log.info("Vision models available: %s; selected: %s", models, models[0])
+        return models[0]
+    _log.warning("No vision-capable model found in Ollama")
+    return None
 
 
 def _ollama_chat(model: str, prompt: str, images: list[str]) -> str:
-    host = os.environ.get("VAANI_OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+    host = _ollama_host()
     payload = json.dumps({
         "model": model,
         "stream": False,
@@ -38,14 +81,42 @@ def _ollama_chat(model: str, prompt: str, images: list[str]) -> str:
     return str(data.get("message", {}).get("content", "")).strip()
 
 
-def analyze_recording(path: str | Path, *, model: str = "qwen3-vl:4b",
+def vision_available(host: str | None = None) -> bool:
+    """Check whether screen analysis is available (vision model installed)."""
+    return bool(detect_vision_models(host))
+
+
+def analyze_recording(path: str | Path, *, model: str | None = None,
                       max_frames: int = 6) -> RecordingAnalysis:
+    """Analyze a screen recording using a local vision model.
+
+    Parameters
+    ----------
+    path : path to video file
+    model : Ollama vision model name, or None for auto-detection
+    max_frames : maximum frames to sample from the recording
+
+    Raises
+    ------
+    RuntimeError
+        If OpenCV is missing, no vision model is available, or analysis fails.
+    """
     try:
         import cv2
     except ImportError as exc:
         raise RuntimeError(
             "Screen analysis requires OpenCV. Install Vaani with the [screen] extra."
         ) from exc
+
+    # Auto-detect vision model if not specified
+    if model is None:
+        model = select_vision_model()
+        if model is None:
+            raise RuntimeError(
+                "No vision-capable model found in Ollama. "
+                "Install a vision model (e.g. 'ollama pull qwen2.5-vl:3b') "
+                "to enable screen analysis."
+            )
 
     source = Path(path).expanduser().resolve()
     if not source.is_file():
@@ -88,4 +159,5 @@ def analyze_recording(path: str | Path, *, model: str = "qwen3-vl:4b",
     report = _ollama_chat(model, prompt, images)
     if not report:
         raise RuntimeError("The local vision model returned an empty analysis.")
-    return RecordingAnalysis(str(source), duration, width, height, fps, len(images), report)
+    return RecordingAnalysis(str(source), duration, width, height, fps,
+                            len(images), report, model_used=model)

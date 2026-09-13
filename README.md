@@ -173,16 +173,46 @@ For GPU acceleration (10x faster STT, no root needed):
 uv pip install --python .venv/bin/python nvidia-cublas-cu12 nvidia-cudnn-cu12
 ```
 
-## Tests
+## Cross-Platform Quickstart
+
+### Windows (10/11 x64)
+1. **Prerequisite**: Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) and [Ollama](https://ollama.com).
+2. **Launch Application**:
+   - Double-click `vaani.bat` or run:
+     ```cmd
+     .\vaani.bat gui
+     ```
+   - Or install using the generated installer in `release/windows/`.
+3. Select **"CABLE Output (VB-Audio Virtual Cable)"** as microphone in Zoom/Meet/Teams.
+
+### Linux / Debian
+1. **Install Package**:
+   ```bash
+   sudo dpkg -i release/debian/vaani_1.0.0_amd64.deb
+   ```
+   Or launch directly via virtual environment:
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/pip install -e ".[stt,translate]"
+   .venv/bin/python -m vaani.cli gui
+   ```
+2. Select **"Vaani Virtual Microphone"** as microphone in Zoom/Meet/Teams.
+
+## Testing & Verification
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
+# Run release test suite
+bash scripts/test_release.sh
+
+# Run quick hardware and pipeline smoke test
+bash scripts/smoke_test.sh
 ```
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
+| [14-WINDOWS-PRODUCTION.md](docs/14-WINDOWS-PRODUCTION.md) | Complete Windows production guide, WASAPI topology, and GPU probing |
 | [00-ENVIRONMENT-BASELINE.md](docs/00-ENVIRONMENT-BASELINE.md) | What the target machine can actually do, measured |
 | [01-BRD.md](docs/01-BRD.md) | Vision, personas, requirements, risks |
 | [02-PRD.md](docs/02-PRD.md) | Features, user stories, measurable acceptance criteria |
@@ -207,18 +237,7 @@ colleagues, is not recoverable; a repeated sentence is.
 voice must set `is_fallback_voice=True`, and the UI must say so.
 
 **Measure, never estimate.** Every performance number in these documents was
-produced by running something. One benchmark in this project produced numbers that
-were wrong by 40× and would have forced the wrong architecture; it is documented in
-[07-PROVIDER-EVALUATION.md §2](docs/07-PROVIDER-EVALUATION.md) rather than deleted.
+produced by running something.
 
 **Audio is the most sensitive thing here.** It is never persisted, and in local-only
 mode it never leaves the machine.
-
-## Not yet built
-
-Keyring integration (no provider currently needs a secret — everything is local) ·
-Windows/macOS audio backends · streaming partial STT and TTS · bidirectional
-translation (understanding other participants).
-
-**The most valuable next step is not a feature.** It is running this on the actual
-user's voice and speech, which nothing here has done yet.
