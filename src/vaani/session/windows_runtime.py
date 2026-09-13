@@ -13,15 +13,6 @@ import shutil
 import socket
 import subprocess
 import time
-from typing import Any
-
-from ..ai.assist import AnswerAssistant
-from ..ai.stt.whisper import FasterWhisperRecognizer
-from ..ai.tts.fallback import FallbackSynthesizer
-from ..ai.translate.ollama import OllamaTranslator
-from ..ai.vad.energy import EnergyVad
-from ..core.types import PerformanceMode
-from .meeting_takeover_app import MeetingTakeoverApp
 
 CPU_OLLAMA_HOST = "http://127.0.0.1:11435"
 CPU_OLLAMA_PORT = 11435
@@ -34,43 +25,37 @@ def _ollama_executable() -> str:
     candidate = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
     if os.path.isfile(candidate):
         return candidate
-    raise RuntimeError(
-        "Ollama executable was not found. Install Ollama before starting Vaani."
-    )
-
-
-def _port_open(host: str = "127.0.0.1", port: int = CPU_OLLAMA_PORT) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.25)
-        return sock.connect_ex((host, port)) == 0
+    raise RuntimeError("Ollama executable was not found. Install Ollama before starting Vaani.")
 
 
 def _tags(host: str) -> list[str]:
     import urllib.request
-
     with urllib.request.urlopen(f"{host}/api/tags", timeout=3) as response:
         payload = json.loads(response.read().decode("utf-8"))
     return [str(item.get("name", "")) for item in payload.get("models", [])]
 
 
+def _has_model(host: str, model: str) -> bool:
+    try:
+        names = _tags(host)
+    except Exception:
+        return False
+    return any(name == model or name.split(":")[0] == model.split(":")[0] for name in names)
+
+
 def ensure_cpu_ollama(model: str, *, timeout_s: float = 30.0) -> str:
     """Ensure a loopback-only CPU Ollama endpoint is available for Vaani."""
-    if _port_open():
-        names = _tags(CPU_OLLAMA_HOST)
-        if any(name == model or name.split(":")[0] == model.split(":")[0] for name in names):
-            return CPU_OLLAMA_HOST
+    if _has_model(CPU_OLLAMA_HOST, model):
+        return CPU_OLLAMA_HOST
 
     exe = _ollama_executable()
     env = os.environ.copy()
     env["OLLAMA_HOST"] = f"127.0.0.1:{CPU_OLLAMA_PORT}"
     env["OLLAMA_LLM_LIBRARY"] = "cpu_avx2"
-    env["OLLAMA_ORIGINS"] = "*"
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     subprocess.Popen(
-        [exe, "serve"],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        [exe, "serve"], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=creationflags,
     )
 
@@ -78,38 +63,45 @@ def ensure_cpu_ollama(model: str, *, timeout_s: float = 30.0) -> str:
     last_error: Exception | None = None
     while time.monotonic() < deadline:
         try:
-            names = _tags(CPU_OLLAMA_HOST)
-            if any(name == model or name.split(":")[0] == model.split(":")[0] for name in names):
+            if _has_model(CPU_OLLAMA_HOST, model):
                 return CPU_OLLAMA_HOST
         except Exception as exc:
             last_error = exc
         time.sleep(0.25)
 
     raise RuntimeError(
-        f"Could not start the private CPU Ollama endpoint at {CPU_OLLAMA_HOST}. "
-        f"Model {model!r} must already exist in the configured Ollama model store."
+        f"Could not start the private CPU Ollama endpoint at {CPU_OLLAMA_HOST}; "
+        f"model {model!r} is not available there."
     ) from last_error
 
 
 class WindowsReliableMeetingRuntime:
-    """Windows meeting runtime using verified CPU STT + CPU Ollama fallback."""
+    """Windows meeting runtime using the verified CPU STT + CPU Ollama path."""
 
     def __init__(self, *, input_device: str, remote_input_device: str,
-                 output_device: str, llm_model: str,
-                 voice: str = "fallback",
-                 performance_mode: PerformanceMode = PerformanceMode.LOW_LATENCY) -> None:
+                 output_device: str, llm_model: str, voice: str = "fallback",
+                 performance_mode=None) -> None:
+        import threading
+        from ..ai.assist import AnswerAssistant
+        from ..ai.stt.whisper import FasterWhisperRecognizer
+        from ..ai.tts.fallback import FallbackSynthesizer
+        from ..ai.translate.ollama import OllamaTranslator
+        from ..ai.vad.energy import EnergyVad
+        from ..core.types import PerformanceMode
+        from .meeting_takeover_app import MeetingTakeoverApp
+
         if os.name != "nt":
             raise RuntimeError("WindowsReliableMeetingRuntime is Windows-only")
-
+        mode = performance_mode or PerformanceMode.LOW_LATENCY
         host = ensure_cpu_ollama(llm_model)
         recognizer = FasterWhisperRecognizer(
             model_size="small", device="cpu", compute_type="int8", beam_size=1)
         recognizer.warmup()
         translator = OllamaTranslator(host=host, model=llm_model)
         translator.warmup()
-
-        synthesizer: Any = FallbackSynthesizer()
+        synthesizer = FallbackSynthesizer()
         profile_id = None
+
         if voice == "personal":
             from ..ai.tts.xtts import XttsSynthesizer
             from ..voice.consent import ConsentLedger
@@ -124,36 +116,19 @@ class WindowsReliableMeetingRuntime:
             synthesizer.warmup()
             profile_id = profile.id
 
-        # Reuse the proven takeover implementation, but replace its heavy
-        # components with the verified CPU/loopback components below.
-        self._app = MeetingTakeoverApp.__new__(MeetingTakeoverApp)
-        self._app.stop_event = __import__("threading").Event()
-        self._app.session = None
-        self._app._remote = None
-        self._app._thread = None
-        self._app._monitor_thread = None
-        self._app._last_result_count = 0
-        self._app.output_device = output_device
-        assistant = AnswerAssistant(translator=translator)
-        from .takeover import TakeoverConfig
-        from .takeover_runtime import MeetingTakeoverRuntime
-        runtime = MeetingTakeoverRuntime(
-            assistant=assistant, synthesizer=synthesizer,
-            config=TakeoverConfig(), voice_profile_id=profile_id)
-        runtime.arm()
-        from .windows_session import WindowsSessionConfig, WindowsTranslationSession
-        self._app.session = WindowsTranslationSession(
-            recognizer=recognizer, translator=translator,
-            synthesizer=synthesizer, vad=EnergyVad(),
-            config=WindowsSessionConfig(
-                input_device=input_device,
-                virtual_output_device=output_device,
-                performance_mode=performance_mode,
-                voice_profile_id=profile_id,
-                use_virtual_mic=True,
-            ))
-        self._app.runtime = runtime
-        self._app.remote_input_device = remote_input_device
+        self._app = MeetingTakeoverApp(
+            input_device=input_device,
+            remote_input_device=remote_input_device,
+            output_device=output_device,
+            model="small",
+            llm_model=llm_model,
+            voice="fallback" if voice != "personal" else "personal",
+            voice_profile_id=profile_id,
+            performance_mode=mode,
+            ollama_host=host,
+            stt_device="cpu",
+            stt_compute_type="int8",
+        )
 
     def start(self) -> None:
         self._app.start()
