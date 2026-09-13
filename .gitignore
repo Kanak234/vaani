@@ -7,3 +7,7 @@ data/
 *.wav
 *.onnx
 .env
+build_debian/
+build/
+dist/
+*.egg-info/

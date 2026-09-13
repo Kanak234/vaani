@@ -1,0 +1,13 @@
+Package: vaani
+Version: 1.0.1
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Vaani Project <vaani@example.com>
+Depends: python3 (>= 3.12), python3-venv, python3-tk
+Recommends: pulseaudio | pipewire-pulse, ollama
+Suggests: nvidia-cuda-toolkit
+Description: Real-time Hindi/Hinglish to English voice translation assistant
+ Vaani is a local, privacy-preserving desktop application that provides
+ real-time voice translation from Hindi and Hinglish to English,
+ with meeting takeover capabilities.

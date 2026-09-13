@@ -161,6 +161,24 @@ def plan_placement(stages: list[str] | None = None,
     return BudgetPlan(placements, free, reserve_mb, notes)
 
 
+_session_plan: BudgetPlan | None = None
+
+
+def plan_session(stages: list[str] | None = None,
+                 costs: dict[str, ModelCost] | None = None,
+                 reserve_mb: int = RESERVE_MB,
+                 cuda_usable: bool | None = None) -> BudgetPlan:
+    """Plan for all models simultaneously and cache the result."""
+    global _session_plan
+    _session_plan = plan_placement(stages, costs, reserve_mb, cuda_usable)
+    return _session_plan
+
+
+def clear_session_plan() -> None:
+    global _session_plan
+    _session_plan = None
+
+
 def resolve_device(stage: str, requested: str = "auto") -> str:
     """Resolve a provider's `device` setting against LIVE free VRAM.
 
@@ -177,4 +195,6 @@ def resolve_device(stage: str, requested: str = "auto") -> str:
     """
     if requested != "auto":
         return requested
+    if _session_plan is not None:
+        return _session_plan.device_for(stage)
     return plan_placement([stage]).device_for(stage)

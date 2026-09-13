@@ -24,7 +24,11 @@ COMMANDS = frozenset({"show", "hide", "toggle", "pause", "resume", "mute",
                       "unmute", "panic", "status", "quit"})
 
 
-def socket_path() -> Path:
+from typing import Union
+
+def socket_path() -> Union[Path, tuple[str, int]]:
+    if os.name == 'nt':
+        return ('127.0.0.1', 18923)
     base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/vaani-{os.getuid()}"
     return Path(base) / "vaani.sock"
 
@@ -40,22 +44,27 @@ class ControlServer:
         self._stop = threading.Event()
 
     def start(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # A stale socket from a crash would block bind(); it is safe to remove
-        # because connect() below would have failed on it anyway.
-        if self.path.exists():
+        if os.name != 'nt':
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.exists():
+                try:
+                    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    probe.settimeout(0.2)
+                    probe.connect(str(self.path))
+                    probe.close()
+                    raise RuntimeError("another Vaani instance is already running")
+                except (ConnectionRefusedError, socket.timeout, OSError):
+                    self.path.unlink(missing_ok=True)
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.bind(str(self.path))
+            os.chmod(self.path, 0o600)
+        else:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                probe.settimeout(0.2)
-                probe.connect(str(self.path))
-                probe.close()
+                self._sock.bind(self.path)
+            except OSError:
                 raise RuntimeError("another Vaani instance is already running")
-            except (ConnectionRefusedError, socket.timeout, OSError):
-                self.path.unlink(missing_ok=True)
 
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.bind(str(self.path))
-        os.chmod(self.path, 0o600)
         self._sock.listen(4)
         self._sock.settimeout(0.5)
         self._thread = threading.Thread(target=self._serve, daemon=True,
@@ -92,18 +101,26 @@ class ControlServer:
                 self._sock.close()
             except OSError:
                 pass
-        self.path.unlink(missing_ok=True)
+        if os.name != 'nt':
+            self.path.unlink(missing_ok=True)
 
 
 def send(command: str, *, timeout: float = 2.0) -> dict:
     """Send one command to a running instance. Raises if none is listening."""
     path = socket_path()
-    if not path.exists():
-        raise ConnectionError("Vaani is not running")
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if os.name == 'nt':
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    else:
+        if not path.exists():
+            raise ConnectionError("Vaani is not running")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
     sock.settimeout(timeout)
     try:
-        sock.connect(str(path))
+        if os.name == 'nt':
+            sock.connect(path)
+        else:
+            sock.connect(str(path))
         sock.sendall(command.encode())
         return json.loads(sock.recv(4096).decode() or "{}")
     finally:

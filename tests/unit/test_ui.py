@@ -20,8 +20,19 @@ from vaani.ui.theme import (
     state_colour,
 )
 
-HAS_DISPLAY = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-needs_display = pytest.mark.skipif(not HAS_DISPLAY, reason="no display")
+def _check_display() -> bool:
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    try:
+        import tkinter as _tk
+        _root = _tk.Tk()
+        _root.destroy()
+        return True
+    except Exception:
+        return False
+
+HAS_DISPLAY = _check_display()
+needs_display = pytest.mark.skipif(not HAS_DISPLAY, reason="no usable display")
 
 
 # --- design tokens ----------------------------------------------------------

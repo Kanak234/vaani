@@ -41,6 +41,7 @@ class ProviderRegistry:
     def __init__(self, *, local_only: bool = False) -> None:
         self._specs: dict[ProviderKind, list[ProviderSpec]] = {}
         self.local_only = local_only
+        self._cache: dict[tuple[ProviderKind, str | None], Provider] = {}
 
     def register(self, spec: ProviderSpec) -> None:
         self._specs.setdefault(spec.kind, []).append(spec)
@@ -64,6 +65,10 @@ class ProviderRegistry:
 
     def get(self, kind: ProviderKind, key: str | None = None, **kwargs) -> Provider:
         """Instantiate a provider, refusing any network provider in local-only mode."""
+        cache_key = (kind, key)
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
         candidates = self._specs.get(kind, [])
         if key is not None:
             spec = next((s for s in candidates if s.key == key), None)
@@ -85,7 +90,9 @@ class ProviderRegistry:
                     provider_key=key,
                     detail={"kind": kind.value},
                 )
-            return spec.factory(**kwargs)
+            instance = spec.factory(**kwargs)
+            self._cache[cache_key] = instance
+            return instance
 
         usable = self.available(kind)
         if not usable:
@@ -97,7 +104,9 @@ class ProviderRegistry:
                 severity=Severity.FATAL,
                 detail={"kind": kind.value, "hidden_by_local_only": hidden},
             )
-        return usable[0].factory(**kwargs)
+        instance = usable[0].factory(**kwargs)
+        self._cache[cache_key] = instance
+        return instance
 
     def assert_local_only_holds(self) -> None:
         """Belt-and-braces check callable at session start.
@@ -143,7 +152,7 @@ def default_registry(*, local_only: bool = False) -> ProviderRegistry:
         from .translate.router import RoutingTranslator
         return RoutingTranslator(
             fast=NllbTranslator(),
-            accurate=OllamaTranslator(model=kw.get("llm_model", "qwen3-coder:latest")),
+            accurate=OllamaTranslator(model=kw.get("llm_model", "phi4-mini:latest")),
         )
 
     def _xtts(**kw):

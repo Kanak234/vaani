@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import enum
 import threading
+import collections
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -49,20 +50,20 @@ _TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
         SessionState.LISTENING, SessionState.FAILED, SessionState.STOPPING}),
     SessionState.LISTENING: frozenset({
         SessionState.TRANSCRIBING, SessionState.PAUSED, SessionState.MUTED,
-        SessionState.RECOVERING, SessionState.STOPPING, SessionState.DEGRADED}),
+        SessionState.RECOVERING, SessionState.STOPPING, SessionState.DEGRADED, SessionState.FAILED}),
     SessionState.TRANSCRIBING: frozenset({
         SessionState.TRANSLATING, SessionState.SUPPRESSED,
-        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING}),
+        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING, SessionState.FAILED}),
     SessionState.TRANSLATING: frozenset({
         SessionState.GATING, SessionState.SUPPRESSED,
-        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING}),
+        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING, SessionState.FAILED}),
     SessionState.GATING: frozenset({
-        SessionState.SYNTHESIZING, SessionState.SUPPRESSED, SessionState.STOPPING}),
+        SessionState.SYNTHESIZING, SessionState.SUPPRESSED, SessionState.STOPPING, SessionState.FAILED}),
     SessionState.SYNTHESIZING: frozenset({
         SessionState.OUTPUTTING, SessionState.SUPPRESSED,
-        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING}),
+        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING, SessionState.FAILED}),
     SessionState.OUTPUTTING: frozenset({
-        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING}),
+        SessionState.LISTENING, SessionState.RECOVERING, SessionState.STOPPING, SessionState.FAILED}),
     # SUPPRESSED is a NORMAL terminal state for an utterance, not an error:
     # it returns straight to listening.
     SessionState.SUPPRESSED: frozenset({SessionState.LISTENING, SessionState.STOPPING}),
@@ -95,7 +96,8 @@ class SessionStateMachine:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _listeners: list[Callable[[SessionState, SessionState], None]] = field(
         default_factory=list, init=False, repr=False)
-    _history: list[SessionState] = field(default_factory=list, init=False, repr=False)
+    _history: collections.deque[SessionState] = field(
+        default_factory=lambda: collections.deque(maxlen=500), init=False, repr=False)
 
     @property
     def state(self) -> SessionState:

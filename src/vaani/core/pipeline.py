@@ -295,9 +295,10 @@ class TranslationPipeline:
                            ErrorCode.TTS_FAILURE.value)
             return None
 
+        is_fallback = getattr(self.synthesizer, 'supports_voice_cloning', True) is False
         audio = SynthesizedAudio(
             samples=np.concatenate(chunks),
             sample_rate=getattr(self.synthesizer, "sample_rate", 16000),
-            voice_profile_id=self.voice_profile_id, is_fallback_voice=False)
+            voice_profile_id=self.voice_profile_id, is_fallback_voice=is_fallback)
         result.audio = audio
         return audio

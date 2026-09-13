@@ -153,7 +153,7 @@ class AnswerAssistant:
         parts += [f"The speaker said: {source_text}",
                   "Suggested English phrasing:"]
 
-        raw = self._llm._generate("\n".join(parts), [], "hi", "en")
+        raw = self._llm.generate_raw("\n".join(parts))
         from .translate.ollama import _strip_model_chatter
         text = _strip_model_chatter(raw)
         if not text:

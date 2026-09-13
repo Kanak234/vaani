@@ -11,6 +11,11 @@ import os
 import sys
 import time
 
+def _get_user_id() -> str:
+    if os.name == 'nt':
+        return os.environ.get('USERNAME', 'user')
+    return str(os.getuid())
+
 from .core.types import PerformanceMode
 
 
@@ -28,7 +33,7 @@ def cmd_devices(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    from .diagnostics.checks import run_all
+    from .diagnostics.checks import run_all, CheckResult
     print("=" * 72)
     print("VAANI DIAGNOSTICS")
     print("=" * 72)
@@ -62,6 +67,9 @@ def cmd_virtualmic(args) -> int:
         print(f"Virtual microphone: {'present (' + existing + ')' if existing else 'not loaded'}")
         return 0
     # destroy
+    if os.name == 'nt':
+        print("Virtual mic management not available on Windows.")
+        return 0
     mic = VirtualMicrophone(node_name="VaaniVirtualMic", sink_name="VaaniSink",
                             _owned=True)
     import subprocess
@@ -649,9 +657,14 @@ def cmd_meeting(args) -> int:
         except Exception:
             pass
 
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             signal.signal(sig, _bail)
+        except (ValueError, OSError):
+            pass
+    if hasattr(signal, 'SIGHUP'):
+        try:
+            signal.signal(signal.SIGHUP, _bail)
         except (ValueError, OSError):
             pass
 
@@ -770,6 +783,10 @@ def cmd_fix_audio(args) -> int:
     is that the user's microphone appears broken everywhere -- with nothing on
     screen connecting it to this program.
     """
+    if os.name == 'nt':
+        print("Virtual mic management not available on Windows.")
+        return 0
+
     import subprocess
 
     from .devices.manager import VIRTUAL_MIC_NAME
@@ -831,8 +848,9 @@ def cmd_fix_audio(args) -> int:
         print(f"  removed {removed} leftover Vaani audio device(s)")
 
     from pathlib import Path
-    Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/vaani-{os.getuid()}")
-         ).joinpath("vaani.sock").unlink(missing_ok=True)
+    if os.name != 'nt':
+        Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/vaani-{_get_user_id()}")
+             ).joinpath("vaani.sock").unlink(missing_ok=True)
 
     print(f"\nDone. Your microphone is back on: {default or 'the system default'}")
     print("Test it with:  vaani transcribe")
@@ -888,7 +906,10 @@ def cmd_route(args) -> int:
 
 def cmd_gui(args) -> int:
     try:
-        from .ui.app import main as gui_main
+        if os.name == 'nt':
+            from .ui.windows_console import main as gui_main
+        else:
+            from .ui.app import main as gui_main
     except ImportError as exc:
         print(f"GUI unavailable: {exc}\n"
               "tkinter is required (apt install python3-tk).", file=sys.stderr)

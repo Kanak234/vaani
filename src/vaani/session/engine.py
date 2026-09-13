@@ -27,7 +27,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from ..audio.backend.pulse_backend import PulseCaptureStream, PulsePlaybackStream
+import os
+
+if os.name == 'nt':
+    from ..audio.backend.windows_backend import WindowsCaptureStream as CaptureStream, WindowsPlaybackStream as PlaybackStream
+    from ..devices.windows_manager import VirtualMicrophone, assert_no_feedback_loop, list_sources
+else:
+    from ..audio.backend.pulse_backend import PulseCaptureStream as CaptureStream, PulsePlaybackStream as PlaybackStream
+    from ..devices.manager import VirtualMicrophone, assert_no_feedback_loop
+
 from ..audio.segmenter import SegmenterConfig, UtteranceSegmenter
 from ..context.engine import ContextConfig, ContextEngine
 from ..core.errors import ErrorCode, Severity, VaaniError
@@ -36,7 +44,6 @@ from ..core.latency_monitor import LatencyMonitor
 from ..core.pipeline import PipelineConfig, TranslationPipeline
 from ..core.state_machine import SessionState, SessionStateMachine
 from ..core.types import PerformanceMode, Utterance, UtteranceResult
-from ..devices.manager import VirtualMicrophone, assert_no_feedback_loop
 
 SAMPLE_RATE = 16000
 FRAME_MS = 20
@@ -98,10 +105,10 @@ class TranslationSession:
         self._muted = threading.Event()
         self._threads: list[threading.Thread] = []
 
-        self._capture: PulseCaptureStream | None = None
+        self._capture: CaptureStream | None = None
         self._virtual_mic: VirtualMicrophone | None = None
-        self._sink: PulsePlaybackStream | None = None
-        self._monitor: PulsePlaybackStream | None = None
+        self._sink: PlaybackStream | None = None
+        self._monitor: PlaybackStream | None = None
 
         self._seq = 0
         self._db = self.config.database
@@ -119,6 +126,11 @@ class TranslationSession:
         """
         if self.sm.can_emit_audio and not self._stop.is_set():
             self._out_queue.put(chunk)
+
+    def inject_audio(self, samples: np.ndarray) -> None:
+        """Public API for injecting synthetic audio (like takeover answers)."""
+        if self.sm.can_emit_audio and not self._stop.is_set():
+            self._out_queue.put(samples)
 
     # ----------------------------------------------------------- lifecycle
 
@@ -155,26 +167,37 @@ class TranslationSession:
 
     def _open_devices(self) -> None:
         if self.config.use_virtual_mic:
-            self._virtual_mic = VirtualMicrophone.create()
-            if self.config.input_device:
-                # Refuse to transcribe our own output (AC-02.5).
-                assert_no_feedback_loop(self.config.input_device,
-                                        self._virtual_mic.node_name)
-            # NOTE: we write to the SINK, not to the source apps read from.
-            # Targeting the source name would open successfully and then play to
-            # the default output instead -- see VirtualMicrophone's docstring.
-            self._sink = PulsePlaybackStream(
-                device=self._virtual_mic.sink_name, sample_rate=SAMPLE_RATE,
-                frame_ms=FRAME_MS, stream_name="virtual-mic-out",
-                require_device=True)
+            if os.name == 'nt':
+                output = getattr(self.config, 'virtual_output_device', None)
+                if not output:
+                    raise RuntimeError("Windows meeting mode requires virtual_output_device")
+                if self.config.input_device:
+                    assert_no_feedback_loop(self.config.input_device, output)
+                self._sink = PlaybackStream(
+                    device=output, sample_rate=SAMPLE_RATE,
+                    frame_ms=FRAME_MS, stream_name="virtual-mic-out",
+                    require_device=True)
+            else:
+                self._virtual_mic = VirtualMicrophone.create()
+                if self.config.input_device:
+                    # Refuse to transcribe our own output (AC-02.5).
+                    assert_no_feedback_loop(self.config.input_device,
+                                            self._virtual_mic.node_name)
+                # NOTE: we write to the SINK, not to the source apps read from.
+                # Targeting the source name would open successfully and then play to
+                # the default output instead -- see VirtualMicrophone's docstring.
+                self._sink = PlaybackStream(
+                    device=self._virtual_mic.sink_name, sample_rate=SAMPLE_RATE,
+                    frame_ms=FRAME_MS, stream_name="virtual-mic-out",
+                    require_device=True)
 
         if self.config.monitor_device:
-            self._monitor = PulsePlaybackStream(
+            self._monitor = PlaybackStream(
                 device=self.config.monitor_device, sample_rate=SAMPLE_RATE,
                 frame_ms=FRAME_MS, stream_name="monitor-out",
                 require_device=True)
 
-        self._capture = PulseCaptureStream(
+        self._capture = CaptureStream(
             device=self.config.input_device, sample_rate=SAMPLE_RATE,
             frame_ms=FRAME_MS, stream_name="mic-in")
 
@@ -307,7 +330,7 @@ class TranslationSession:
                 # The invariant, checked at the last possible moment: an emergency
                 # stop between synthesis and playback must still win.
                 if self.sm.can_emit_audio:
-                    self._out_queue.put(result.audio.samples)
+                    self.inject_audio(result.audio.samples)
             warning = self.latency_monitor.record(result)
             if warning is not None and self._on_latency_warning:
                 try:

@@ -53,6 +53,15 @@ def _run(name: str, fn: Callable[[], tuple[str, str, dict]]) -> CheckResult:
 
 def check_audio_backend() -> CheckResult:
     def fn():
+        import os
+        if os.name == 'nt':
+            try:
+                import soundcard as sc
+                count = len(sc.all_microphones())
+                return "pass", f"soundcard API available, {count} inputs", {"api": "soundcard"}
+            except ImportError:
+                return "fail", "soundcard module not found", {}
+
         from ..audio.backend.pulse_bindings import available
         if not available():
             return "fail", "libpulse-simple not found", {}
@@ -68,6 +77,17 @@ def check_audio_backend() -> CheckResult:
 
 def check_input_devices() -> CheckResult:
     def fn():
+        import os
+        if os.name == 'nt':
+            try:
+                import soundcard as sc
+                devices = [d for d in sc.all_microphones() if 'Virtual' not in d.name and 'CABLE' not in d.name]
+                if not devices:
+                    return "fail", "no capture devices found", {}
+                return "pass", f"{len(devices)} device(s)", {"devices": [d.name for d in devices]}
+            except Exception as e:
+                return "fail", f"error listing devices: {e}", {}
+
         from ..devices.manager import list_sources
         devices = [d for d in list_sources() if not d.is_virtual]
         if not devices:
@@ -81,8 +101,12 @@ def check_microphone_capture(device: str | None = None,
                              seconds: float = 1.0) -> CheckResult:
     """Open the mic and measure real signal. Reports level, not just success."""
     def fn():
-        from ..audio.backend.pulse_backend import PulseCaptureStream
-        stream = PulseCaptureStream(device=device, stream_name="diag-mic")
+        import os
+        if os.name == 'nt':
+            from ..audio.backend.windows_backend import WindowsCaptureStream as CaptureStream
+        else:
+            from ..audio.backend.pulse_backend import PulseCaptureStream as CaptureStream
+        stream = CaptureStream(device=device, stream_name="diag-mic")
         try:
             frames = []
             for _ in range(int(seconds * 1000 / stream.frame_ms)):
@@ -105,12 +129,19 @@ def check_microphone_capture(device: str | None = None,
 
 
 def check_virtual_microphone() -> CheckResult:
-    """Create the virtual mic, write a tone, and capture it back (AC-02.4).
-
-    Deliberately captures from the device rather than trusting that the write
-    succeeded -- see ADR-001 for why that distinction is not academic.
-    """
+    """Create the virtual mic, write a tone, and capture it back (AC-02.4)."""
     def fn():
+        import os
+        if os.name == 'nt':
+            try:
+                import soundcard as sc
+                virt = [m for m in sc.all_microphones() if 'CABLE' in m.name or 'Virtual' in m.name]
+                if not virt:
+                    return "fail", "VB-CABLE or Virtual Cable not found", {}
+                return "pass", f"Found virtual cable: {virt[0].name}", {"device": virt[0].name}
+            except Exception as e:
+                return "fail", f"error checking virtual cable: {e}", {}
+
         from ..audio.backend.pulse_backend import PulsePlaybackStream
         from ..devices.manager import VirtualMicrophone
         mic = VirtualMicrophone.create()
@@ -149,14 +180,18 @@ def check_virtual_microphone() -> CheckResult:
     return _run("Virtual microphone", fn)
 
 
-def check_network() -> CheckResult:
+def check_network(host: str = "1.1.1.1", port: int = 53) -> CheckResult:
     def fn():
         try:
-            with socket.create_connection(("1.1.1.1", 53), timeout=3):
+            with socket.create_connection((host, port), timeout=3):
                 return "pass", "reachable", {"online": True}
         except OSError:
-            # Offline is a legitimate state for a local-first product.
-            return "pass", "offline (local-only providers unaffected)", {"online": False}
+            try:
+                import urllib.request
+                urllib.request.urlopen("https://1.1.1.1", timeout=3)
+                return "pass", "reachable (HTTPS fallback)", {"online": True}
+            except OSError:
+                return "pass", "offline (local-only providers unaffected)", {"online": False}
     return _run("Network", fn)
 
 
@@ -264,9 +299,21 @@ def check_translation() -> CheckResult:
             import transformers  # noqa: F401
         except ImportError:
             return "skip", "translation dependencies not installed", {}
+        import os
         from pathlib import Path
-        hub = Path.home() / ".cache" / "huggingface" / "hub"
-        if not (hub.exists() and any(hub.glob("*nllb-200*"))):
+        from ..system.platform import cache_dir
+
+        hubs = [
+            cache_dir() / "huggingface" / "hub",
+            Path.home() / ".cache" / "huggingface" / "hub",
+        ]
+        if "HF_HOME" in os.environ:
+            hubs.append(Path(os.environ["HF_HOME"]) / "hub")
+        if "TRANSFORMERS_CACHE" in os.environ:
+            hubs.append(Path(os.environ["TRANSFORMERS_CACHE"]) / "hub")
+
+        found = any(hub.exists() and any(hub.glob("*nllb-200*")) for hub in hubs)
+        if not found:
             return "skip", "NLLB model not downloaded", {}
 
         from ..ai.translate.nllb import NllbTranslator

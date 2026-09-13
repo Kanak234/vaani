@@ -205,9 +205,10 @@ class OllamaTranslator(TranslationEngine):
     def _generate(self, text: str, turns: list[tuple[str, str]],
                   source_language: str, target_language: str,
                   num_predict: int | None = None) -> str:
+        prompt = self._build_prompt(text, turns, source_language, target_language)
         payload = json.dumps({
             "model": self.model,
-            "prompt": self._build_prompt(text, turns, source_language, target_language),
+            "prompt": prompt,
             "stream": False,
             "keep_alive": self.keep_alive,
             "options": {
@@ -245,6 +246,45 @@ class OllamaTranslator(TranslationEngine):
         self._last_latency_ms = (time.perf_counter() - started) * 1000
         return str(body.get("response", ""))
 
+    def generate_raw(self, prompt: str, *, model: str | None = None) -> str:
+        """Send a raw prompt to the LLM, bypassing the translation system prompt."""
+        payload = json.dumps({
+            "model": model or self.model,
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "options": {
+                "temperature": self.temperature,
+                "num_predict": self.num_predict,
+                "top_p": 1.0 if self.temperature == 0 else 0.9,
+                "repeat_penalty": 1.1,
+            },
+        }).encode()
+
+        request = urllib.request.Request(
+            f"{self.host}/api/generate", data=payload,
+            headers={"Content-Type": "application/json"})
+
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as resp:
+                body = json.loads(resp.read())
+        except TimeoutError as exc:
+            raise VaaniError(
+                code=ErrorCode.TRANSLATION_TIMEOUT,
+                message=f"LLM request timed out after {self.timeout_s:.0f}s",
+                stage="assist", provider_key=self.key, cause=exc,
+            ) from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise self._fail(ErrorCode.PROVIDER_UNAVAILABLE,
+                             f"Ollama request failed: {exc}",
+                             severity=Severity.SESSION, cause=exc) from exc
+        except json.JSONDecodeError as exc:
+            raise self._fail(ErrorCode.TRANSLATION_FAILURE,
+                             "Ollama returned malformed JSON", cause=exc) from exc
+
+        return str(body.get("response", ""))
+
+
 
 def _is_loopback(host: str) -> bool:
     return bool(re.match(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/?$",
@@ -271,23 +311,15 @@ def _strip_model_chatter(raw: str) -> str:
     would be worse than most translation errors.
     """
     text = _THINK_BLOCK.sub("", raw or "").strip()
-    # Take the first non-empty line: the translation is one utterance, and
-    # anything after it is commentary.
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Applied repeatedly: models stack prefixes ("Sure! Here is the
-        # translation: ..."), and one pass would leave the rest behind.
-        for _ in range(4):
-            stripped = _CHATTER.sub("", line).strip()
-            if stripped == line:
-                break
-            line = stripped
-        line = line.strip('"').strip("'").strip()
-        if line:
-            return line
-    return ""
+
+    for _ in range(4):
+        stripped = _CHATTER.sub("", text).strip()
+        if stripped == text:
+            break
+        text = stripped
+
+    text = text.strip('"').strip("'").strip()
+    return text
 
 
 def _confidence(source: str, output: str, *, same_language: bool = False) -> float:

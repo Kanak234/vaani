@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Vaani
+Comment=Real-time voice translation assistant
+Exec=vaani gui
+Icon=vaani
+Terminal=false
+Categories=Utility;Audio;
+Keywords=translation;voice;meeting;
