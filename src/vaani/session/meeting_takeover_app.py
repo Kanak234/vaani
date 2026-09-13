@@ -57,7 +57,10 @@ class MeetingTakeoverApp:
                  output_device: str | None = None, model: str = "small",
                  llm_model: str = "qwen3:8b", voice: str = "personal",
                  voice_profile_id: str | None = None,
-                 performance_mode: PerformanceMode = PerformanceMode.BALANCED) -> None:
+                 performance_mode: PerformanceMode = PerformanceMode.BALANCED,
+                 ollama_host: str | None = None,
+                 stt_device: str = "auto",
+                 stt_compute_type: str | None = None) -> None:
         self.stop_event = threading.Event()
         self.session = None
         self._remote = None
@@ -66,9 +69,13 @@ class MeetingTakeoverApp:
         self._last_result_count = 0
         self.output_device = output_device
 
-        recognizer = FasterWhisperRecognizer(model_size=model, device="auto")
+        recognizer = FasterWhisperRecognizer(
+            model_size=model, device=stt_device, compute_type=stt_compute_type)
         recognizer.warmup()
-        translator = OllamaTranslator(model=llm_model)
+        translator_kwargs = {"model": llm_model}
+        if ollama_host:
+            translator_kwargs["host"] = ollama_host
+        translator = OllamaTranslator(**translator_kwargs)
         translator.warmup()
 
         synthesizer = FallbackSynthesizer()
@@ -118,24 +125,37 @@ class MeetingTakeoverApp:
         self.remote_input_device = remote_input_device
 
     def start(self) -> None:
-        self.session.start()
-        if os.name == "nt":
-            from ..audio.backend.windows_backend import WindowsCaptureStream
-            self._remote = WindowsCaptureStream(
-                device=self.remote_input_device, sample_rate=16000,
-                frame_ms=20, stream_name="takeover-remote-in",
-                include_loopback=True)
-        else:
-            from ..audio.backend.pulse_backend import PulseCaptureStream
-            self._remote = PulseCaptureStream(
-                device=self.remote_input_device, sample_rate=16000,
-                frame_ms=20, stream_name="takeover-remote-in")
-        self._thread = threading.Thread(target=self._remote_loop,
-                                         name="vaani-takeover-remote", daemon=True)
-        self._monitor_thread = threading.Thread(target=self._user_signal_loop,
-                                                name="vaani-takeover-user-signals", daemon=True)
-        self._thread.start()
-        self._monitor_thread.start()
+        try:
+            self.session.start()
+            if os.name == "nt":
+                from ..audio.backend.windows_backend import WindowsCaptureStream
+                self._remote = WindowsCaptureStream(
+                    device=self.remote_input_device, sample_rate=16000,
+                    frame_ms=20, stream_name="takeover-remote-in",
+                    include_loopback=True)
+            else:
+                from ..audio.backend.pulse_backend import PulseCaptureStream
+                self._remote = PulseCaptureStream(
+                    device=self.remote_input_device, sample_rate=16000,
+                    frame_ms=20, stream_name="takeover-remote-in")
+            self.stop_event.clear()
+            self._thread = threading.Thread(target=self._remote_loop,
+                                             name="vaani-takeover-remote", daemon=True)
+            self._monitor_thread = threading.Thread(target=self._user_signal_loop,
+                                                    name="vaani-takeover-user-signals", daemon=True)
+            self._thread.start()
+            self._monitor_thread.start()
+        except Exception:
+            self.stop_event.set()
+            if self._remote is not None:
+                self._remote.close()
+                self._remote = None
+            if self.session is not None:
+                try:
+                    self.session.stop()
+                except Exception:
+                    pass
+            raise
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -160,13 +180,17 @@ class MeetingTakeoverApp:
             try:
                 frame = self._remote.read_frame()
                 segment = segmenter.push(frame, vad.is_speech(frame))
-            except Exception:
+            except Exception as exc:
+                if not self.stop_event.is_set():
+                    print(f"[TAKEOVER] remote audio stopped: {exc}")
                 return
             if segment is None:
                 continue
             try:
                 transcript = recognizer.transcribe(segment.audio, 16000)
-            except Exception:
+            except Exception as exc:
+                if not self.stop_event.is_set():
+                    print(f"[TAKEOVER] remote STT error: {exc}")
                 continue
             text = transcript.text.strip()
             if not looks_like_question(text):
