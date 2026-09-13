@@ -65,20 +65,12 @@ def assert_no_feedback_loop(input_device_key: str, virtual_mic_name: str) -> Non
 
 
 def virtual_mic_consumers(node_name: str = VIRTUAL_MIC_NAME):
-    # Windows does not expose PulseAudio source-output introspection. A meeting
-    # client consuming a virtual cable endpoint cannot be reliably identified by
-    # Vaani, so this API intentionally returns an empty list rather than guessing.
     return []
 
 
 @dataclass(slots=True)
 class VirtualMicrophone:
-    """Windows virtual-mic endpoint backed by an external virtual cable.
-
-    Vaani cannot create a kernel audio driver from Python. On Windows the supported
-    topology is therefore: Vaani writes to a virtual-cable playback endpoint and
-    the meeting application selects the cable's recording endpoint as its mic.
-    """
+    """Windows virtual-mic endpoint backed by an external virtual cable."""
     sink_name: str
     node_name: str = VIRTUAL_MIC_NAME
     sink_module_id: int | None = None
@@ -108,3 +100,20 @@ class VirtualMicrophone:
 
     def __exit__(self, *exc) -> None:
         self.destroy()
+
+
+def main() -> int:
+    print("CAPTURE DEVICES (use with --input / --remote-input)")
+    for d in list_sources(include_monitors=True):
+        tag = " [LOOPBACK]" if d.is_monitor else ""
+        print(f"  {d.display_name}{tag}\n      key: {d.key}")
+    print("\nPLAYBACK DEVICES (use with --output-device / --monitor)")
+    for d in list_sinks():
+        print(f"  {d.display_name}\n      key: {d.key}")
+    print("\nWindows meeting mode needs a virtual audio cable: Vaani writes to its playback endpoint,")
+    print("and the meeting app selects the matching recording endpoint as its microphone.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
