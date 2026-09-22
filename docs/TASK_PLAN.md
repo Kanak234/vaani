@@ -26,6 +26,36 @@ Verified:
 Unverified (from repo docs only): measured latencies, virtual-mic round trip, XTTS
 VRAM figures. They have never been run on Kanak's own voice. The 60-min soak has never been run.
 
+## Phase 0 re-audit (2026-09-22, Kanak's HP Victus, local)
+
+The cloud audit above ran on a CPU-only box with no GPU and no audio device.
+Re-checked here on the real laptop. Corrections:
+
+Verified on this machine:
+- **CUDA works.** `torch.cuda.is_available() == True`, RTX 3050 Laptop 4 GB,
+  torch 2.14.0+cu130 on Python 3.14.4. The brief's assumption that the
+  proprietary driver might be missing does NOT hold here. CPU fallback is
+  therefore still UNVERIFIED - it has not been forced and exercised.
+- **Suite: 318 passed, 0 failed.** The cloud run's `test_ui.py` failure was an
+  environment artifact (no tkinter there); tkinter is present here.
+  The `test_control.py` failure was caused by the uncommitted takeover verbs
+  and is now fixed.
+- Deps import cleanly: faster_whisper 1.2.1, TTS 0.27.5, transformers 4.57.6.
+- Ollama installed models here: `phi4-mini:latest`, `qwen2.5-coder:3b`,
+  `rishi-phi4-mini-latest`, `rishi-qwen2.5-coder-3b`.
+- **`ai/assist.py:123` still hardcodes `model="qwen3-coder:latest"`, which is
+  NOT installed on this machine.** cli.py's hardcoded default was removed by the
+  recovered WIP; assist.py's was missed. Live bug - Phase 3.
+- ~3 GB of untracked build output (`ci_artifacts/`, `release/windows/`) was
+  sitting in the tree. Now gitignored, never committed.
+
+Could NOT verify here:
+- The cloud audit's "ruff: 31 issues, F821 at ui/app.py:560". **ruff is not
+  installed in this venv**, so that claim is neither confirmed nor refuted.
+  Install ruff before ticking the Phase 1 lint box.
+- `silero_vad` and `sounddevice` do not import as top-level modules. Believed
+  intentional (torch.hub VAD; ctypes libpulse backend) but NOT confirmed.
+
 ## Phase 0 — Audit & docs
 - [x] Inspect repo, both branches, tests, lint
 - [x] PRD.md, TRD.md, UI_UX_BRIEF.md, TASK_PLAN.md
@@ -33,7 +63,7 @@ VRAM figures. They have never been run on Kanak's own voice. The 60-min soak has
 - [ ] Kanak confirms the proposed defaults (PRD V-7 thresholds, TRD O1–O3, hotkeys)
 
 ## Phase 1 — Core pipeline hardening
-- [ ] Fix F821 in ui/app.py; ruff clean on touched files
+- [ ] Install ruff in the venv (missing), then fix F821 in ui/app.py; ruff clean on touched files
 - [ ] `core/supervisor.py`: stage timeout/exception/OOM wrapper + tests
 - [ ] Bounded queues + drop-oldest counters in session/engine.py + tests
 - [ ] Worker thread supervision (restart stage; 3 crashes/60 s → fallback)
@@ -52,15 +82,18 @@ VRAM figures. They have never been run on Kanak's own voice. The 60-min soak has
 
 ## Phase 3 — Auto model detection
 - [ ] CUDA "really works" probe + VAANI_FORCE_CPU
-- [ ] `system/model_select.py` ranking + reasons; `bench_cache.py`
-- [ ] Remove hardcoded model defaults → "auto"
-- [ ] Supervisor fallback chain wired per stage; overlay toast
+- [~] Ranking + reasons landed as `ai/model_detect.py` (rank_models / probe_model /
+      resolve_llm_model), not `system/model_select.py`. `bench_cache.py` still missing.
+- [~] Remove hardcoded model defaults → "auto" (cli.py done via ai/model_detect.py;
+      `ai/assist.py:123` STILL hardcodes qwen3-coder:latest - not installed here)
+- [~] `ai/registry.get_with_fallback()` landed; per-stage supervisor wiring + overlay toast pending
 - [ ] `vaani models` command (shows choices + reasons)
 - [~] verify_phase3.sh (GPU run + FORCE_CPU run) on the laptop
 
 ## Phase 4 — Takeover
 - [ ] `session/continuation.py` (Takeover A) + tests
-- [ ] Wire Takeover B into the Linux meeting session behind `--listen-remote`
+- [~] Takeover B: `session/remote_listener.py` + cli `takeover` + ipc verbs +
+      `overlay.set_takeover()` landed; end-to-end Linux meeting wiring unproven
 - [ ] AI-tagged output + `cancel` ≤200 ms + tests (measure like measure_emergency_stop)
 - [ ] Overlay AI-SPEAKING banner (can't be hidden)
 - [ ] CLI/IPC: takeover, cancel
@@ -91,3 +124,7 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
 
 ## Session log
 - 2026-09-22 Phase 0 done in a cloud session. Commits are local; delivered as a git bundle.
+- 2026-09-22 Local session on the Victus. Recovered the cloud session's bundle
+  (it had never reached the repo) into branch `v1-complete`, then committed
+  ~1430 lines of Phase 3/4 work that was sitting uncommitted and unlost.
+  Suite green at 318. Phase 0 still blocked on Kanak confirming defaults.
