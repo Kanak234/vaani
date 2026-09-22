@@ -17,6 +17,7 @@ def _get_user_id() -> str:
     return str(os.getuid())
 
 from .core.errors import ErrorCode, Severity, VaaniError
+from .session.input_mode import InputMode
 from .system.logging import setup_logging
 from .core.types import PerformanceMode
 
@@ -760,6 +761,19 @@ def cmd_meeting(args) -> int:
     print("Starting Vaani in meeting mode...")
     try:
         recognizer = FasterWhisperRecognizer.for_mode(PerformanceMode(args.mode))
+        # WHY THIS WARNING EXISTS: warmup() downloads the Whisper model on
+        # first run - up to ~1.5 GB for `medium` - through huggingface_hub,
+        # whose progress bars do not reach the terminal here. The user got
+        # "Starting Vaani in meeting mode..." followed by several minutes of
+        # complete silence, which is indistinguishable from a hang. It was
+        # mistaken for one during Phase 2 testing, which is exactly what a
+        # first-time user would conclude before killing it.
+        # The real fix is to pre-fetch models in install.sh (Phase 6); until
+        # then, at least say what is happening and that it happens once.
+        if not recognizer.is_cached():
+            print(f"  first run: downloading the '{recognizer.model_size}' "
+                  f"speech model (this can take several minutes on a slow "
+                  f"link, and happens only once)...", flush=True)
         recognizer.warmup()
         print(f"  recognition: {recognizer.model_size} on {recognizer.device_used}")
     except Exception as exc:
@@ -810,6 +824,9 @@ def cmd_meeting(args) -> int:
         vad=EnergyVad(),
         config=SessionConfig(input_device=args.input,
                              performance_mode=PerformanceMode(args.mode),
+                             # Chosen at startup, changeable mid-meeting with
+                             # `vaani mode-*`. See session/input_mode.py.
+                             input_mode=InputMode(args.input_mode),
                              voice_profile_id=voice_profile_id))
 
     overlay = MeetingOverlay(
@@ -900,6 +917,30 @@ def cmd_meeting(args) -> int:
             root.after(0, root.quit)
         elif command == "quit":
             root.after(0, root.quit)
+        elif command in ("bypass-on", "bypass-off", "bypass"):
+            # Bypass = the user's real voice on the virtual mic. The overlay is
+            # updated from the returned state rather than recomputed, so the
+            # banner can never disagree with what the audio path is doing.
+            if command == "bypass":
+                on = session.toggle_bypass()
+            else:
+                on = command == "bypass-on"
+                session.set_bypass(on)
+            root.after(0, lambda: overlay.set_input_mode(
+                session.input_mode.state().label))
+        elif command == "talk":
+            # Push-to-talk, toggle flavour: the one that needs no special
+            # permissions, so a plain desktop shortcut can drive it.
+            session.toggle_talk()
+            root.after(0, lambda: overlay.set_input_mode(
+                session.input_mode.state().label))
+        elif command.startswith("mode-"):
+            mode = {"mode-always-on": InputMode.ALWAYS_ON,
+                    "mode-ptt-toggle": InputMode.PTT_TOGGLE,
+                    "mode-ptt-hold": InputMode.PTT_HOLD}[command]
+            session.set_input_mode(mode)
+            root.after(0, lambda: overlay.set_input_mode(
+                session.input_mode.state().label))
         elif command.startswith("takeover-"):
             if takeover_rt is None:
                 return {"error": "takeover is not enabled; restart with "
@@ -932,6 +973,7 @@ def cmd_meeting(args) -> int:
                     "remote_questions": (remote_listener.questions_seen
                                          if remote_listener else 0)}
         return {"state": session.sm.state.value, "visible": overlay.visible,
+                "input_mode": session.input_mode.state().label,
                 "utterances": session.total_utterances,
                 "p50_ms": stats.get("p50") if stats else None}
 
@@ -1137,6 +1179,13 @@ def cmd_control(args) -> int:
             print("             untranslated voice. Select 'Vaani Virtual")
             print("             Microphone' as the mic inside your meeting app.")
         print(f"state      {reply.get('state')}")
+        # The most important line for someone mid-meeting: BYPASS means the
+        # room is hearing raw Hindi, MUTED means it is hearing nothing.
+        mode = reply.get("input_mode")
+        if mode:
+            hint = {"BYPASS": "  <-- your REAL voice, untranslated",
+                    "MUTED": "  <-- nothing is being sent"}.get(mode, "")
+            print(f"input      {mode}{hint}")
         print(f"overlay    {'visible' if reply.get('visible') else 'hidden'}")
         print(f"utterances {reply.get('utterances')}")
         p50 = reply.get("p50_ms")
@@ -1317,6 +1366,12 @@ def main(argv: list[str] | None = None) -> int:
                    choices=[m.value for m in PerformanceMode])
     p.add_argument("--voice", default="personal",
                    choices=["personal", "fallback"])
+    # WHY always_on is the default: in a normal meeting the user just talks.
+    # ptt_hold needs evdev access (the `input` group), so it is opt-in and
+    # never the default on a fresh install.
+    p.add_argument("--input-mode", default=InputMode.ALWAYS_ON.value,
+                   choices=[m.value for m in InputMode],
+                   help="always_on (default), ptt_toggle, or ptt_hold")
     # D-3 FIX: default None = auto-detect (F-22). The old default was
     # `qwen3-coder:latest`, which is (a) not installed on this machine and (b)
     # the build this repo MEASURED getting dates wrong. Pass a name to pin one.
@@ -1384,7 +1439,22 @@ def main(argv: list[str] | None = None) -> int:
                            ("takeover-now",
                             "answer the pending question right now"),
                            ("takeover-stop",
-                            "stop Vaani speaking for you (always works)")):
+                            "stop Vaani speaking for you (always works)"),
+                           # Phase 2 meeting controls. Bind these to desktop
+                           # shortcuts; they need no special permissions
+                           # because they go through the control socket rather
+                           # than grabbing the keyboard.
+                           ("bypass",
+                            "toggle YOUR OWN voice through, untranslated"),
+                           ("bypass-on", "pass your real voice through"),
+                           ("bypass-off", "go back to translated speech"),
+                           ("talk", "push-to-talk: toggle whether you are live"),
+                           ("mode-always-on",
+                            "translate everything you say (default)"),
+                           ("mode-ptt-toggle",
+                            "translate only after `vaani talk`"),
+                           ("mode-ptt-hold",
+                            "translate only while the talk key is held")):
         sp = sub.add_parser(name, help=helptext)
         sp.set_defaults(func=cmd_control, command=name)
 

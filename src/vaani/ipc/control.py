@@ -32,7 +32,12 @@ from pathlib import Path
 #: flushes queued audio, including a takeover answer that is mid-sentence.
 COMMANDS = frozenset({"show", "hide", "toggle", "pause", "resume", "mute",
                       "unmute", "panic", "status", "quit",
-                      "takeover-arm", "takeover-stop", "takeover-now"})
+                      "takeover-arm", "takeover-stop", "takeover-now",
+                      # Phase 2 meeting controls. `bypass` puts the user's real
+                      # voice on the virtual mic; `talk` is push-to-talk; `mode`
+                      # switches between always-on and the two PTT flavours.
+                      "bypass-on", "bypass-off", "bypass", "talk",
+                      "mode-always-on", "mode-ptt-toggle", "mode-ptt-hold"})
 
 
 from typing import Union

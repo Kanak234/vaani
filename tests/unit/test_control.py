@@ -62,7 +62,10 @@ def test_command_vocabulary_is_closed():
     # a deliberate edit to this list, never an accident.
     assert control.COMMANDS == {"show", "hide", "toggle", "pause", "resume",
                                 "mute", "unmute", "panic", "status", "quit",
-                                "takeover-arm", "takeover-stop", "takeover-now"}
+                                "takeover-arm", "takeover-stop", "takeover-now",
+                                "bypass-on", "bypass-off", "bypass", "talk",
+                                "mode-always-on", "mode-ptt-toggle",
+                                "mode-ptt-hold"}
 
 
 def test_handler_exception_does_not_kill_the_server(sock):

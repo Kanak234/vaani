@@ -77,6 +77,16 @@ class MeetingOverlay:
                                        fg=p.text_muted, font=font("label"))
         self._takeover_state = "off"
 
+        # Input-mode badge. WHY it is always visible rather than shown only in
+        # the non-default states: the user needs to answer "is the meeting
+        # hearing my translation, my real voice, or nothing?" at a glance, and
+        # an absent badge is ambiguous between "normal" and "the overlay is
+        # broken". BYPASS is red because the room is hearing untranslated Hindi.
+        self.input_badge = tk.Label(header, text="LIVE", bg=p.bg_surface,
+                                    fg=p.text_muted, font=font("label"))
+        self.input_badge.pack(side="left", padx=(SPACE["sm"], 0))
+        self._input_mode = "LIVE"
+
         controls = tk.Frame(self.win, bg=p.bg_surface)
         controls.pack(fill="x", padx=SPACE["md"], pady=SPACE["sm"])
         self._mini(controls, "Hide", self.hide).pack(side="left")
@@ -173,6 +183,27 @@ class MeetingOverlay:
             self.takeover_badge.pack(side="left", padx=(SPACE["sm"], 0))
         else:
             self.takeover_badge.pack_forget()
+
+    def set_input_mode(self, label: str) -> None:
+        """Show whether the meeting is hearing the translation, the user's own
+        voice, or nothing.
+
+        `label` comes straight from InputState.label ("LIVE" / "BYPASS" /
+        "MUTED") rather than being recomputed here, so the badge cannot
+        disagree with what the audio path is actually doing.
+
+        Same contract as set_takeover: called from the meeting loop's Tk thread
+        via root.after, cheap, and never raises - the colour lookup has a
+        default instead of a KeyError.
+        """
+        if label == self._input_mode:
+            return                      # no needless Tk work on every poll
+        self._input_mode = label
+        p = self.palette
+        colour = {"BYPASS": p.state_error,      # the room hears raw Hindi
+                  "MUTED": p.text_muted,
+                  "LIVE": p.text_muted}.get(label, p.text_muted)
+        self.input_badge.configure(text=label, fg=colour)
 
     def set_lines(self, source: str, output: str, *, suppressed: bool = False) -> None:
         p = self.palette

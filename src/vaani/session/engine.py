@@ -44,6 +44,7 @@ from ..core.latency_monitor import LatencyMonitor
 from ..core.pipeline import PipelineConfig, TranslationPipeline
 from ..core.state_machine import SessionState, SessionStateMachine
 from ..core.supervisor import StageSupervisor
+from .input_mode import InputMode, InputModeController
 from ..system.logging import get_logger
 from ..core.types import PerformanceMode, Utterance, UtteranceResult
 
@@ -83,6 +84,10 @@ class SessionConfig:
     #: Audio blocks waiting on the output thread. At ~1 utterance per block
     #: this is minutes of speech: only a genuinely stuck output thread fills it.
     max_queued_audio_blocks: int = 256
+    #: How the user signals they want to be translated. ALWAYS_ON is the
+    #: default because in a normal meeting the user simply talks; needing to
+    #: hold a key to be understood would defeat the product.
+    input_mode: InputMode = InputMode.ALWAYS_ON
     #: A stage failing this many times inside the window drops to fallback.
     stage_crash_limit: int = 3
     stage_crash_window_s: float = 60.0
@@ -122,6 +127,9 @@ class TranslationSession:
             maxsize=self.config.max_queued_utterances)
         self._out_queue: queue.Queue[np.ndarray | None] = queue.Queue(
             maxsize=self.config.max_queued_audio_blocks)
+        # WHERE IT IS READ: _capture_loop consults this for every frame to
+        # decide translate / pass raw voice through / drop.
+        self.input_mode = InputModeController(self.config.input_mode)
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._muted = threading.Event()
@@ -366,6 +374,58 @@ class TranslationSession:
         """Mute stops audio entering the pipeline at all (AC-10.3)."""
         self._muted.set() if muted else self._muted.clear()
 
+    # ----------------------------------------------------------- input modes
+
+    def set_bypass(self, enabled: bool) -> None:
+        """Pass the user's real voice through, untranslated.
+
+        WHY THE FLUSH: bypass exists for the moment the translation is wrong or
+        the user needs to speak for themselves right now. If a half-spoken AI
+        sentence kept playing underneath their real voice, the meeting would
+        hear two people at once - the exact failure the input-mode invariant
+        exists to prevent, arriving through the audio queue instead of through
+        the state machine. So entering bypass drops everything already
+        synthesised but not yet played, the same way emergency_stop does.
+
+        WHERE THE DATA FLOWS NEXT: _capture_loop starts routing raw frames to
+        _put_audio, so the virtual mic carries the microphone directly.
+        """
+        if enabled:
+            self._flush_pending_audio()
+        self.input_mode.set_bypass(enabled)
+        _log.info("bypass %s", "ON (real voice)" if enabled else "OFF")
+
+    def toggle_bypass(self) -> bool:
+        self.set_bypass(not self.input_mode.bypass)
+        return self.input_mode.bypass
+
+    def set_input_mode(self, mode: InputMode) -> None:
+        self.input_mode.set_mode(mode)
+        _log.info("input mode -> %s", mode.value)
+
+    def toggle_talk(self) -> bool:
+        """Push-to-talk, toggle flavour. Returns whether the user is now live."""
+        state = self.input_mode.toggle()
+        # Releasing mid-sentence must not leave a fragment to be stitched on.
+        if not state.translating_enabled:
+            self.segmenter.reset()
+        return state.translating_enabled
+
+    def press_talk(self) -> None:
+        self.input_mode.press()
+
+    def release_talk(self) -> None:
+        self.input_mode.release()
+        self.segmenter.reset()
+
+    def _flush_pending_audio(self) -> None:
+        """Drop synthesised audio that has not been played yet."""
+        while True:
+            try:
+                self._out_queue.get_nowait()
+            except queue.Empty:
+                break
+
     # -------------------------------------------------------------- threads
 
     def _capture_loop(self) -> None:
@@ -379,6 +439,32 @@ class TranslationSession:
             if self._muted.is_set() or self._paused.is_set():
                 # Reset so a mute in mid-sentence does not later emit a fragment
                 # stitched to whatever is said after unmuting.
+                self.segmenter.reset()
+                self.vad.reset()
+                continue
+
+            # One immutable snapshot per frame. Read once rather than querying
+            # the controller three times, so a hotkey pressed mid-frame cannot
+            # produce a frame that is half translated and half passed through.
+            mode_state = self.input_mode.state()
+
+            if mode_state.passthrough_enabled:
+                # BYPASS: the meeting hears the user's ACTUAL voice. The frame
+                # goes straight to the virtual mic without touching VAD, STT,
+                # translation or TTS.
+                # WHY reset the segmenter too: whatever was part-spoken when
+                # bypass was pressed must not be stitched onto the next
+                # translated sentence after bypass is released.
+                self.segmenter.reset()
+                self.vad.reset()
+                self._put_audio(frame)
+                continue
+
+            if not mode_state.translating_enabled:
+                # A push-to-talk mode with the key not held. Identical handling
+                # to mute: nothing enters the pipeline, and the segmenter is
+                # reset so releasing the key mid-sentence does not later emit a
+                # fragment glued to the next press.
                 self.segmenter.reset()
                 self.vad.reset()
                 continue

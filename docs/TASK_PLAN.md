@@ -100,12 +100,30 @@ Could NOT verify here:
       session machinery does not leak, not that Whisper/XTTS do not.
 
 ## Phase 2 — Meeting mode
-- [ ] `session/input_mode.py` (always_on / ptt_toggle / ptt_hold / bypass) + tests
-- [ ] Bypass path in engine (flush TTS queue, raw mic → vmic) + tests
-- [ ] `system/evdev_ptt.py` optional hold-to-talk + tests (fake device)
-- [ ] CLI + IPC: ptt, bypass (+ COMMANDS set)
-- [ ] Overlay: states from UI brief, live latency, hold-to-talk button
-- [ ] Virtual mic cleanup on SIGTERM/SIGINT/panic/crash-orphan + tests
+- [x] `session/input_mode.py`: pure state machine, no audio/threads. 31 tests,
+      including an exhaustive parametrised sweep proving translation and
+      passthrough are NEVER both enabled (two overlapping voices in the meeting).
+      Bypass is a flag, not a fourth mode, so releasing it restores the previous
+      state exactly.
+- [x] Bypass path in engine: raw frames → virtual mic, VAD/STT/MT/TTS skipped
+      entirely, and entering bypass flushes queued TTS so a half-spoken AI
+      sentence cannot play under the user's real voice. 14 routing tests driving
+      _capture_loop with a fake capture stream. Mute correctly outranks both
+      bypass and a held talk key.
+- [x] CLI + IPC: `bypass`, `bypass-on/off`, `talk`, `mode-always-on|ptt-toggle|
+      ptt-hold`; `--input-mode` at startup; closed COMMANDS vocabulary updated.
+      **Verified against a live session**, effects confirmed in the log.
+- [x] Overlay: `set_input_mode()` badge (LIVE / BYPASS / MUTED), BYPASS in red
+      because the room is hearing untranslated Hindi. `status` now prints the
+      input mode with an explicit warning line.
+- [x] Virtual mic cleanup — **VERIFIED ON REAL HARDWARE, not assumed.**
+      Live meeting session: 2 PipeWire modules → 0 after SIGTERM, process exited
+      in 4 s, and 2 Microsoft Edge streams were restored to the real microphone.
+      Create/reuse/destroy separately verified: second create reused rather than
+      stacking, 0 modules left behind.
+- [ ] `system/evdev_ptt.py` optional hold-to-talk (NOT STARTED). ptt_hold is
+      selectable and gates audio correctly, but nothing yet reads the physical
+      key — it must currently be driven via `vaani talk` / the control socket.
 - [~] verify_phase2.sh + manual Meet check (Kanak)
 
 ## Phase 3 — Auto model detection
@@ -146,6 +164,16 @@ Could NOT verify here:
 - [ ] Checklist A1–A8 with PASS / UNVERIFIED and evidence
 - [ ] List of what couldn't be verified (desktop machine, etc.)
 
+## Backlog raised during Phase 2
+- **First run is silent for minutes.** `vaani meeting` prints "Starting Vaani in
+  meeting mode..." then downloads the Whisper model (~1.5 GB for `medium`) with no
+  progress reaching the terminal. It was mistaken for a hang during testing —
+  a first-time user would kill it. Mitigated with an explicit "first run:
+  downloading..." notice (`FasterWhisperRecognizer.is_cached()`); the real fix is
+  pre-fetching models in install.sh (Phase 6).
+- Measured on this machine once warm: STT resolves to **medium on cuda**, and the
+  virtual mic appears ~18 s after launch.
+
 ## Backlog raised during Phase 1
 - Hard stage timeouts need a subprocess worker; in-process preemption of a native
   Whisper/XTTS call is not possible. Revisit if a hang is ever observed in practice.
@@ -173,3 +201,7 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
   at -0.88% RSS growth over 360 utterances. Suite 372 green, ruff clean.
   NOT done: hard stage timeouts (impossible in-process, see Phase 1 notes) and the
   real-provider 30-min soak, which needs Kanak's hardware and voice.
+- 2026-09-22 Phase 2 core done. Input modes + bypass implemented and wired end to
+  end; verified against a live meeting session on real PipeWire, including SIGTERM
+  cleanup and app restoration. Suite 417 green, ruff clean. Outstanding: evdev
+  hold-to-talk, and the manual Meet call which needs Kanak.
