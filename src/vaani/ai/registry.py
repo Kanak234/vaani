@@ -108,6 +108,66 @@ class ProviderRegistry:
         self._cache[cache_key] = instance
         return instance
 
+    def get_with_fallback(self, kind: ProviderKind, *, warmup: bool = True,
+                          **kwargs) -> tuple[Provider, dict[str, str]]:
+        """Try every usable provider in priority order; return the first that works.
+
+        WHY THIS IS SEPARATE FROM `get()`
+        `get()` instantiates `usable[0]` and lets a failing factory propagate. That
+        is the right behaviour for the local-only guarantee -- eleven tests depend
+        on its exact semantics, including that an explicitly requested cloud
+        provider is an ERROR rather than a silent downgrade -- so it is left
+        untouched. This method is the graceful path for start-up (F-22): when the
+        preferred engine cannot load on this machine, run on the next one instead
+        of refusing to start a meeting.
+
+        `warmup=True` means a provider must actually LOAD before it counts as
+        working. Construction alone proves nothing: `NllbTranslator()` constructs
+        happily without torch installed and only fails when warmed. Discovering
+        that mid-call is exactly the failure this is meant to prevent.
+
+        Returns `(provider, failures)` where `failures` maps each rejected
+        provider key to why it was rejected, so the caller can tell the user what
+        it fell back FROM -- a silent downgrade looks like a bug.
+
+        Raises only when every candidate failed, with all the reasons attached.
+        Used by: cli.py meeting/run start-up.
+        """
+        usable = self.available(kind)
+        if not usable:
+            hidden = len(self.excluded(kind))
+            extra = (f" ({hidden} hidden by local-only mode)" if hidden else "")
+            raise VaaniError(
+                code=ErrorCode.PROVIDER_UNAVAILABLE,
+                message=f"no usable {kind.value} provider{extra}",
+                severity=Severity.FATAL,
+                detail={"kind": kind.value, "hidden_by_local_only": hidden},
+            )
+
+        failures: dict[str, str] = {}
+        for spec in usable:
+            try:
+                instance = spec.factory(**kwargs)
+                if warmup:
+                    instance.warmup()
+            except Exception as exc:
+                # Broad on purpose: a provider factory can raise anything at all
+                # (ImportError for a missing torch, OSError for a missing model
+                # file, VaaniError for a refused load). Any of them means "not
+                # this one" and none of them should abort the search.
+                failures[spec.key] = f"{type(exc).__name__}: {exc}"[:200]
+                continue
+            self._cache[(kind, spec.key)] = instance
+            return instance, failures
+
+        raise VaaniError(
+            code=ErrorCode.PROVIDER_UNAVAILABLE,
+            message=f"every {kind.value} provider failed: "
+                    + ", ".join(f"{k} ({v})" for k, v in failures.items()),
+            severity=Severity.FATAL,
+            detail={"kind": kind.value, "tried": failures},
+        )
+
     def assert_local_only_holds(self) -> None:
         """Belt-and-braces check callable at session start.
 

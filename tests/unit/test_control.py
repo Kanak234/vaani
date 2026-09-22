@@ -56,8 +56,13 @@ def test_unknown_commands_are_rejected(server):
 
 def test_command_vocabulary_is_closed():
     assert "eval" not in control.COMMANDS
+    # The vocabulary stays CLOSED - it just grew by the three takeover verbs.
+    # WHY this test exists: the control socket is unauthenticated, so anything
+    # accepted here is reachable by any local process. Adding a command must be
+    # a deliberate edit to this list, never an accident.
     assert control.COMMANDS == {"show", "hide", "toggle", "pause", "resume",
-                                "mute", "unmute", "panic", "status", "quit"}
+                                "mute", "unmute", "panic", "status", "quit",
+                                "takeover-arm", "takeover-stop", "takeover-now"}
 
 
 def test_handler_exception_does_not_kill_the_server(sock):

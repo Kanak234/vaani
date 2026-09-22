@@ -16,6 +16,7 @@ def _get_user_id() -> str:
         return os.environ.get('USERNAME', 'user')
     return str(os.getuid())
 
+from .core.errors import ErrorCode, Severity, VaaniError
 from .core.types import PerformanceMode
 
 
@@ -532,6 +533,207 @@ def cmd_transcribe(args) -> int:
 
 
 
+def _build_translator(fast, args) -> tuple[object, str]:
+    """Build the best translator that actually warms up, and say which it is.
+
+    This is the single degradation ladder used by every entry point, which is
+    the D-3 fix: `meeting`, `run` and the takeover app used to hardcode three
+    DIFFERENT default models (`qwen3-coder:latest`, `phi4-mini:latest`,
+    `qwen3:8b`), two of which were not installed on the development machine.
+    Now they all come through here and all get `--llm-model` = None = detect.
+
+    The ladder, best first:
+
+        1. routing  NLLB for Devanagari/English + local LLM for romanised
+                    Hinglish. Measured 14/14 -- the only 100% configuration.
+        2. NLLB     the LLM could not load. Romanised Hinglish then comes back
+                    untranslated and the gate suppresses it (ADR-003), so the
+                    user gets silence and a reason, never wrong speech.
+        3. LLM      NLLB could not load -- which is the CURRENT state of a
+                    `pip install -e ".[stt,translate]"` venv, because NLLB needs
+                    torch and that extra does not pull it (D-4). The LLM alone
+                    handles every register; it is just slower.
+        4. fail     nothing loaded. The caller aborts before opening a mic.
+
+    Returns `(translator, note)`. The note is printed, because a silent
+    downgrade from "your voice, translated" to "suppressed" looks like a bug.
+    """
+    from .ai.translate.ollama import OllamaTranslator
+    from .ai.translate.router import RoutingTranslator
+
+    # None => auto-detect (F-22). An explicit --llm-model is still honoured and
+    # still hard-fails if absent, rather than being silently substituted.
+    pinned = getattr(args, "llm_model", None)
+    llm = OllamaTranslator(model=pinned) if pinned else OllamaTranslator(model=None)
+
+    llm_error: str | None = None
+    try:
+        llm.warmup()
+    except Exception as exc:
+        llm_error = str(exc)
+        llm = None
+
+    fast_error: str | None = None
+    try:
+        fast.warmup()
+    except Exception as exc:
+        # NLLB is the one that fails on a torch-less install, so this branch is
+        # not hypothetical -- it is the default state of the documented install.
+        fast_error = str(exc)
+        fast = None
+
+    if fast is not None and llm is not None:
+        router = RoutingTranslator(fast=fast, accurate=llm)
+        # Both halves are already warm; RoutingTranslator.warmup() would only
+        # re-warm them. Setting health directly keeps start-up off a second
+        # model load.
+        from .ai.base import HealthState
+        router._set_health(HealthState.READY, "routing ready")
+        return router, f"routing (NLLB + {llm.model})"
+
+    if fast is not None:
+        return fast, f"NLLB only -- romanised Hinglish will be suppressed ({llm_error})"
+
+    if llm is not None:
+        return llm, f"local LLM only ({llm.model}) -- NLLB unavailable ({fast_error})"
+
+    raise VaaniError(
+        code=ErrorCode.PROVIDER_UNAVAILABLE,
+        message=f"no translation engine could start. NLLB: {fast_error}. "
+                f"LLM: {llm_error}.",
+        severity=Severity.FATAL)
+
+
+def _build_takeover(args, *, session, recognizer, synthesizer,
+                    voice_profile_id, overlay, root):
+    """Wire up F-21 takeover, or refuse with a reason. Returns (runtime, listener).
+
+    Returns `(None, None)` after printing WHY when a precondition fails. Each
+    refusal is a separate, actionable message (AC-21.5) because "takeover
+    unavailable" on its own is useless at the start of a call.
+
+    Preconditions, and why each one is hard rather than a warning:
+
+      E-2 remote == input   we would transcribe the USER as the remote party,
+                            so Vaani would answer the user's own questions in
+                            the user's own voice. Nonsense, and confusing to
+                            debug from the symptom.
+      E-5 no enrolled voice no consent, or no profile, means the answer would be
+                            spoken in the FALLBACK voice -- a synthetic robot
+                            claiming to be the owner in front of colleagues.
+                            AC-21.6 forbids this outright.
+      E-4 no LLM            there is nothing to draft an answer WITH. Translation
+                            is unaffected and keeps running if the user restarts
+                            without --takeover.
+
+    Note what is NOT a precondition: arming. `--takeover` opens the remote stream
+    but leaves the policy OFF (AC-21.2), because listening is observable and
+    harmless while authorising generated speech is neither.
+    """
+    from .ai.assist import AnswerAssistant
+    from .ai.translate.ollama import OllamaTranslator
+    from .session.remote_listener import RemoteQuestionListener, looks_hesitant
+    from .session.takeover import TakeoverConfig
+    from .session.takeover_runtime import MeetingTakeoverRuntime
+
+    remote = getattr(args, "remote_input", None)
+    if not remote:
+        # E-1. Also enforced at parse time; kept here so the programmatic path
+        # cannot bypass it.
+        print("ERROR: --takeover needs --remote-input (the meeting's monitor "
+              "source).\n       Find it with: vaani devices --all",
+              file=sys.stderr)
+        return None, None
+
+    if args.input and remote == args.input:
+        print(f"ERROR: --remote-input and --input are the same device "
+              f"({remote!r}).\n       Vaani would hear you as the other party. "
+              "Pick the monitor of your OUTPUT sink.", file=sys.stderr)
+        return None, None
+
+    if voice_profile_id is None:
+        print("ERROR: takeover needs your enrolled voice, and none is active.\n"
+              "       Run: vaani consent grant && vaani enroll record\n"
+              "       (Refusing rather than speaking for you in the fallback "
+              "robot voice.)", file=sys.stderr)
+        return None, None
+
+    # The assistant needs `generate_raw`, which only OllamaTranslator has -- the
+    # router does not implement it, so it cannot be passed here.
+    llm = OllamaTranslator(model=getattr(args, "llm_model", None))
+    try:
+        llm.warmup()
+    except Exception as exc:
+        print(f"ERROR: takeover needs a local LLM to draft answers: {exc}\n"
+              "       Start Ollama (`ollama serve`) and pull one "
+              "(`ollama pull phi4-mini`).", file=sys.stderr)
+        return None, None
+
+    runtime = MeetingTakeoverRuntime(
+        assistant=AnswerAssistant(translator=llm),
+        synthesizer=synthesizer,
+        config=TakeoverConfig(
+            silence_after_question_s=getattr(args, "takeover_silence", 4.0)),
+        voice_profile_id=voice_profile_id)
+
+    def emit(response) -> None:
+        """Speak an authorised answer and record it where the user can audit it."""
+        if response is None or response.audio is None:
+            return
+        if not session.sm.can_emit_audio:
+            return          # a panic between authorisation and playback wins
+        session.inject_audio(response.audio.samples)
+        # Printed AND shown: docs/15 §2.7 requires every generated sentence to be
+        # attributable after the fact, with the reason it was triggered.
+        print(f"[TAKEOVER] heard: {response.question}")
+        print(f"[TAKEOVER] said : {response.text}   (reason={response.reason})")
+        root.after(0, lambda: overlay.set_lines(
+            f"[them] {response.question}", f"[Vaani spoke] {response.text}"))
+
+    def on_question(text: str) -> None:
+        runtime.observe_remote_question(text)
+        root.after(0, lambda: overlay.set_takeover(runtime.controller.state.value))
+
+    listener = RemoteQuestionListener(
+        device=remote, recognizer=recognizer, on_question=on_question,
+        performance_mode=PerformanceMode(args.mode),
+        on_error=lambda msg: print(f"[TAKEOVER] {msg}", file=sys.stderr))
+
+    # The user-signal side: every utterance the MAIN pipeline produces is also
+    # evidence about whether the user is answering or stuck. Hooking the
+    # session's existing result callback avoids a second STT pass over the same
+    # audio -- the transcript already exists by the time this runs.
+    previous_on_result = session._on_result
+
+    def on_result_with_takeover(result) -> None:
+        if previous_on_result is not None:
+            previous_on_result(result)
+        if result.transcript is None:
+            return
+        runtime.observe_user_speech(result.transcript.text,
+                                    hesitation=looks_hesitant(result.transcript.text))
+        emit(runtime.respond_if_authorized())
+        root.after(0, lambda: overlay.set_takeover(runtime.controller.state.value))
+
+    session._on_result = on_result_with_takeover
+
+    # Poll for the silence-based handoff. Nothing in the result callback fires
+    # while the user is SILENT, which is precisely the case takeover exists for,
+    # so a timer is required rather than optional.
+    def poll_takeover() -> None:
+        if runtime.controller.armed:
+            try:
+                emit(runtime.respond_if_authorized())
+            except VaaniError:
+                pass        # no pending question yet; normal
+            overlay.set_takeover(runtime.controller.state.value)
+        root.after(1000, poll_takeover)
+
+    root.after(1000, poll_takeover)
+    runtime._emit = emit            # reused by the `takeover-now` control command
+    return runtime, listener
+
+
 def cmd_meeting(args) -> int:
     """Background meeting mode: starts hidden, driven by the control socket.
 
@@ -561,15 +763,27 @@ def cmd_meeting(args) -> int:
         print(f"ERROR: recognition unavailable: {exc}", file=sys.stderr)
         return 2
 
-    translator = NllbTranslator()
+    # D-1 FIX (docs/15 §4). The old code did:
+    #
+    #     translator = NllbTranslator()
+    #     try:
+    #         translator = RoutingTranslator(fast=translator, accurate=...)
+    #         translator.warmup()
+    #     except Exception:
+    #         translator.warmup()      # <-- `translator` is the ROUTER now
+    #
+    # The assignment inside the `try` clobbered the name, so the recovery path
+    # re-warmed the object that had just failed and raised during handling of
+    # the first exception. Reproduced: `vaani meeting` died with a traceback
+    # instead of degrading. Keeping the fast engine in its OWN name is the whole
+    # fix -- `fast` is never reassigned, so the fallback can always reach it.
+    fast = NllbTranslator()
     try:
-        translator = RoutingTranslator(fast=translator,
-                                       accurate=OllamaTranslator(model=args.llm_model))
-        translator.warmup()
-        print("  translation: routing (NMT + local LLM)")
-    except Exception as exc:
-        print(f"  translation: NLLB only ({exc})")
-        translator.warmup()
+        translator, translation_note = _build_translator(fast, args)
+    except VaaniError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"  translation: {translation_note}")
 
     synthesizer, voice_profile_id, voice_note = FallbackSynthesizer(), None, "fallback"
     if args.voice != "fallback":
@@ -620,6 +834,43 @@ def cmd_meeting(args) -> int:
 
     session._on_result = on_result
 
+    # ------------------------------------------------------------- takeover
+    # F-21. This is the unification: until now `vaani meeting` could translate
+    # but never hear the other side, while MeetingTakeoverApp could take over
+    # but had no overlay, no control socket and no auto-routing. Both now run in
+    # this one process, sharing one recognizer, one session and one control
+    # socket.
+    #
+    # Placed AFTER `session._on_result = on_result` on purpose: _build_takeover
+    # CHAINS onto whatever callback is already installed. Building it earlier
+    # would work and then be silently clobbered by the assignment above, which
+    # is the sort of bug that only shows up in a live call.
+    #
+    # `takeover_rt` stays None unless --takeover was passed and every use below
+    # is guarded, so the default path is exactly the old behaviour.
+    takeover_rt = None
+    remote_listener = None
+    if getattr(args, "takeover", False):
+        takeover_rt, remote_listener = _build_takeover(
+            args, session=session, recognizer=recognizer,
+            synthesizer=synthesizer, voice_profile_id=voice_profile_id,
+            overlay=overlay, root=root)
+        if takeover_rt is None:
+            # _build_takeover already explained which precondition failed
+            # (E-1/E-2/E-4/E-5). Refuse rather than start a meeting that is
+            # quietly not what was asked for.
+            return 2
+        if getattr(args, "arm", False):
+            # --arm is the one way takeover is live from the first second. It is
+            # a separate flag from --takeover precisely so that the common case
+            # (start before the call, arm only if I actually freeze) does not
+            # authorise generated speech by accident.
+            takeover_rt.arm()
+            print("  takeover: ARMED from start (--arm)")
+        else:
+            print("  takeover: listening, OFF until armed "
+                  "(`vaani takeover-arm`, or say 'Vaani, take over')")
+
     def handle(command: str) -> dict:
         if command == "show":
             root.after(0, overlay.show)
@@ -636,16 +887,61 @@ def cmd_meeting(args) -> int:
         elif command == "unmute":
             session.set_muted(False)
         elif command == "panic":
+            # Panic must also disarm takeover, not just stop the audio. Leaving
+            # it ARMED after an emergency stop would let it speak again the
+            # moment the session recovered -- the opposite of what the user
+            # asked for by hitting panic.
+            if takeover_rt is not None:
+                takeover_rt.stop()
             session.emergency_stop()
             root.after(0, root.quit)
         elif command == "quit":
             root.after(0, root.quit)
+        elif command.startswith("takeover-"):
+            if takeover_rt is None:
+                return {"error": "takeover is not enabled; restart with "
+                                 "`vaani meeting --takeover --remote-input ...`"}
+            if command == "takeover-arm":
+                takeover_rt.arm()
+            elif command == "takeover-stop":
+                takeover_rt.stop()
+            elif command == "takeover-now":
+                # Skip the policy wait and speak to the pending question now.
+                # Still refuses when OFF: `take_over()` returns WAIT/
+                # "takeover_not_armed", so this cannot be used to bypass arming.
+                takeover_rt.controller.take_over(reason="control_socket")
+                try:
+                    takeover_rt._emit(takeover_rt.respond_if_authorized())
+                except VaaniError as exc:
+                    return {"error": str(exc)}
+            root.after(0, lambda: overlay.set_takeover(
+                takeover_rt.controller.state.value))
         stats = session.latency_percentiles()
+        if takeover_rt is not None:
+            # Surfaced in `vaani status` so the user can check from a terminal
+            # whether Vaani is currently authorised to speak for them.
+            return {"state": session.sm.state.value, "visible": overlay.visible,
+                    "utterances": len(session.results),
+                    "p50_ms": stats.get("p50") if stats else None,
+                    "takeover": takeover_rt.controller.state.value,
+                    "remote_heard": (remote_listener.utterances_heard
+                                     if remote_listener else 0),
+                    "remote_questions": (remote_listener.questions_seen
+                                         if remote_listener else 0)}
         return {"state": session.sm.state.value, "visible": overlay.visible,
                 "utterances": len(session.results),
                 "p50_ms": stats.get("p50") if stats else None}
 
     import signal
+
+    # D-2 FIX (docs/15 §4). `_bail` closes over `router`, which used to be
+    # assigned ~40 lines BELOW this point, after the model warm-up and
+    # session.start(). A Ctrl+C during those seconds therefore raised
+    # UnboundLocalError *inside the signal handler* -- so `root.quit()` was never
+    # reached and, worse, the meeting apps were left routed to a virtual mic
+    # belonging to a dead process. Binding the name first makes the handler
+    # correct at every instant of start-up.
+    router = None
 
     def _bail(_signum, _frame):
         # Ctrl+C and `kill` must still put the microphone back. Only kill -9
@@ -681,6 +977,18 @@ def cmd_meeting(args) -> int:
         control.stop()
         print(f"ERROR: could not start: {exc}", file=sys.stderr)
         return 2
+
+    if remote_listener is not None:
+        # Started after the session so the two capture streams never race for
+        # the same PulseAudio context during device setup.
+        try:
+            remote_listener.start()
+            print(f"  takeover: listening to {args.remote_input}")
+        except Exception as exc:
+            # E-3 at start-up: translation is already running and is the more
+            # important half, so do not abort the meeting over this.
+            print(f"  takeover: remote capture unavailable ({exc}); "
+                  "explicit 'Vaani, take over' still works", file=sys.stderr)
 
     print()
     print("=" * 66)
@@ -720,6 +1028,8 @@ def cmd_meeting(args) -> int:
     print("  Control it from any terminal, or bind these to KDE shortcuts:")
     print("    vaani show     vaani hide     vaani toggle")
     print("    vaani pause    vaani mute     vaani panic")
+    if takeover_rt is not None:
+        print("    vaani takeover-arm   takeover-now   takeover-stop")
     print("=" * 66)
 
     try:
@@ -728,6 +1038,12 @@ def cmd_meeting(args) -> int:
         pass
     finally:
         control.stop()
+        if remote_listener is not None:
+            # Stopped FIRST: its thread holds a capture stream and calls into
+            # the runtime, so tearing the session down underneath it would race.
+            remote_listener.stop()
+        if takeover_rt is not None:
+            takeover_rt.stop()
         if router is not None:
             # Put meeting apps back on a real microphone. Leaving them on a dead
             # virtual mic would make the user silent in their next call.
@@ -740,6 +1056,56 @@ def cmd_meeting(args) -> int:
         except Exception:
             pass
     print("Stopped.")
+    return 0
+
+
+def cmd_takeover(args) -> int:
+    """Headless takeover: `MeetingTakeoverApp`, reachable from the CLI at last.
+
+    AC-21.7. This used to be invokable only as
+    `python -m vaani.session.meeting_takeover_app`, which is why nobody could
+    find it. Prefer `vaani meeting --takeover`, which additionally gives you the
+    overlay, the control socket and automatic mic routing; this is for headless
+    use and is the same runtime the Windows console drives.
+    """
+    import time as _time
+
+    from .session.meeting_takeover_app import MeetingTakeoverApp
+
+    if args.input and args.remote_input == args.input:
+        print(f"ERROR: --remote-input and --input are the same device "
+              f"({args.remote_input!r}); Vaani would hear you as the other "
+              "party.", file=sys.stderr)
+        return 2
+
+    # Resolve the LLM up front so a missing model is a clear error here rather
+    # than a stack trace several seconds into MeetingTakeoverApp's constructor.
+    from .ai.model_detect import resolve_llm_model
+    choice = resolve_llm_model(pinned=args.llm_model)
+    if not choice.ok:
+        print(f"ERROR: {choice.describe()}", file=sys.stderr)
+        return 2
+    print(f"  LLM: {choice.describe()}")
+
+    try:
+        app = MeetingTakeoverApp(
+            input_device=args.input, remote_input_device=args.remote_input,
+            output_device=args.output_device, model=args.model,
+            llm_model=choice.name, voice=args.voice,
+            performance_mode=PerformanceMode(args.mode))
+    except Exception as exc:
+        print(f"ERROR: could not start takeover: {exc}", file=sys.stderr)
+        return 2
+
+    print("Vaani takeover armed. Say 'Vaani, take over'. Ctrl+C to stop.")
+    try:
+        app.start()
+        while True:
+            _time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        app.stop()
     return 0
 
 
@@ -942,7 +1308,12 @@ def main(argv: list[str] | None = None) -> int:
                    choices=[m.value for m in PerformanceMode])
     p.add_argument("--voice", default="personal",
                    choices=["personal", "fallback"])
-    p.add_argument("--llm-model", default="qwen3-coder:latest")
+    # D-3 FIX: default None = auto-detect (F-22). The old default was
+    # `qwen3-coder:latest`, which is (a) not installed on this machine and (b)
+    # the build this repo MEASURED getting dates wrong. Pass a name to pin one.
+    p.add_argument("--llm-model", default=None,
+                   help="Ollama model for romanised Hinglish and takeover "
+                        "answers. Default: auto-detect the best installed one.")
     p.add_argument("--show", action="store_true",
                    help="start with the overlay visible (default: hidden)")
     p.add_argument("--corner", default="bottom-right",
@@ -950,7 +1321,42 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-auto-route", dest="auto_route", action="store_false",
                    help="do not move meeting apps onto the virtual mic "
                         "automatically; switch the microphone yourself instead")
+    # ---- F-21 takeover, opt-in ----
+    p.add_argument("--takeover", action="store_true",
+                   help="also listen to the other participants so Vaani can "
+                        "answer in your voice when you freeze. Requires "
+                        "--remote-input. Starts OFF; arm it separately.")
+    p.add_argument("--remote-input",
+                   help="monitor source carrying the MEETING's audio (the other "
+                        "side). See `vaani devices --all`.")
+    p.add_argument("--arm", action="store_true",
+                   help="arm takeover immediately instead of waiting for "
+                        "`vaani takeover-arm`")
+    p.add_argument("--takeover-silence", type=float, default=4.0,
+                   help="seconds of silence after a question before Vaani may "
+                        "answer (default 4.0)")
     p.set_defaults(func=cmd_meeting, auto_route=True)
+
+    # Standalone takeover entry point (AC-21.7). `vaani meeting --takeover` is
+    # the one to use -- it has the overlay, the control socket and auto-routing.
+    # This exists because MeetingTakeoverApp is also the Windows console's
+    # runtime, and because it is the only way to run takeover headless.
+    p = sub.add_parser("takeover",
+                       help="takeover-only mode, no overlay (prefer: "
+                            "`vaani meeting --takeover`)")
+    p.add_argument("--input", help="your physical microphone device name")
+    p.add_argument("--remote-input", required=True,
+                   help="monitor source carrying the meeting's audio")
+    p.add_argument("--output-device",
+                   help="Windows virtual-cable playback endpoint")
+    p.add_argument("--model", default="small", help="Whisper model size")
+    p.add_argument("--llm-model", default=None,
+                   help="Ollama model (default: auto-detect)")
+    p.add_argument("--voice", default="personal",
+                   choices=["personal", "fallback"])
+    p.add_argument("--mode", default="balanced",
+                   choices=[m.value for m in PerformanceMode])
+    p.set_defaults(func=cmd_takeover)
 
     for name, helptext in (("show", "show the overlay"),
                            ("hide", "hide the overlay (translation keeps running)"),
@@ -960,7 +1366,16 @@ def main(argv: list[str] | None = None) -> int:
                            ("mute", "stop capturing audio"),
                            ("unmute", "resume capturing audio"),
                            ("panic", "emergency stop and exit"),
-                           ("status", "show the running session's status")):
+                           ("status", "show the running session's status"),
+                           # F-21 control verbs. Same KDE-shortcut pattern as
+                           # the rest -- see ipc/control.py for why a socket and
+                           # not a hotkey.
+                           ("takeover-arm",
+                            "allow Vaani to answer for you when you freeze"),
+                           ("takeover-now",
+                            "answer the pending question right now"),
+                           ("takeover-stop",
+                            "stop Vaani speaking for you (always works)")):
         sp = sub.add_parser(name, help=helptext)
         sp.set_defaults(func=cmd_control, command=name)
 
@@ -1013,8 +1428,10 @@ def main(argv: list[str] | None = None) -> int:
                    choices=["routing", "nllb", "none"],
                    help="'routing' = NLLB + LLM for romanised Hinglish (best "
                         "accuracy); 'nllb' = fast only; 'none' = pass-through")
-    p.add_argument("--llm-model", default="qwen3-coder:latest",
-                   help="Ollama model used for romanised Hinglish")
+    # D-3: same auto-detect default as `meeting`. All three entry points agree.
+    p.add_argument("--llm-model", default=None,
+                   help="Ollama model used for romanised Hinglish "
+                        "(default: auto-detect the best installed one)")
     p.add_argument("--voice", default="personal", choices=["personal", "fallback"],
                    help="'personal' uses your enrolled voice if available")
     p.add_argument("--save-transcript", action="store_true",
@@ -1026,6 +1443,15 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_run)
 
     args = ap.parse_args(argv)
+
+    # E-1, enforced at parse time so the failure arrives instantly rather than
+    # after 30 s of model loading. `ap.error` exits 2, which is the conventional
+    # code for a usage error and is what the tests assert on.
+    if getattr(args, "takeover", False) and not getattr(args, "remote_input", None):
+        ap.error("--takeover requires --remote-input (the monitor source "
+                 "carrying the meeting's audio). List devices with: "
+                 "vaani devices --all")
+
     return args.func(args)
 
 

@@ -20,8 +20,19 @@ from collections.abc import Callable
 from pathlib import Path
 
 #: Fixed command vocabulary. Anything else is rejected.
+#:
+#: The three `takeover-*` verbs are the control surface for F-21
+#: (docs/15-MEETING-UNIFICATION.md §2.3). They exist here rather than as GUI
+#: buttons for the same Wayland reason as the rest: during a meeting the focus is
+#: on Zoom, so the only shortcut that can reach us is one KDE/GNOME binds to a
+#: COMMAND. "Vaani, take over" also works, but it is spoken into the call --
+#: `takeover-now` is the silent way to do it.
+#:
+#: Note `panic` still outranks all of them: it emergency-stops the session, which
+#: flushes queued audio, including a takeover answer that is mid-sentence.
 COMMANDS = frozenset({"show", "hide", "toggle", "pause", "resume", "mute",
-                      "unmute", "panic", "status", "quit"})
+                      "unmute", "panic", "status", "quit",
+                      "takeover-arm", "takeover-stop", "takeover-now"})
 
 
 from typing import Union

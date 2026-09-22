@@ -91,13 +91,22 @@ class OllamaTranslator(TranslationEngine):
     #: Set to True automatically when a non-local host is configured.
     requires_network = False
 
-    def __init__(self, *, host: str = _DEFAULT_HOST, model: str = _DEFAULT_MODEL,
+    def __init__(self, *, host: str = _DEFAULT_HOST, model: str | None = _DEFAULT_MODEL,
                  timeout_s: float = 30.0, max_context_turns: int = 6,
                  temperature: float = 0.0, num_predict: int = 200,
                  keep_alive: str = "0") -> None:
         super().__init__()
         self.host = host.rstrip("/")
+        # model=None means "auto-detect" (F-22): warmup() asks Ollama what is
+        # installed, ranks by measured quality, and tries each in turn. A
+        # explicit name is still honoured exactly and still hard-fails if it is
+        # absent -- see warmup(). `self.model` is filled in by warmup() in the
+        # auto case, so callers can read back which model actually ran.
         self.model = model
+        #: True when the caller asked us to choose. Kept so warmup() can tell an
+        #: auto-detect failure ("nothing installed") from a pinned-model failure
+        #: ("you asked for X and X is missing"), which need different messages.
+        self.auto_select = model is None
         self.timeout_s = timeout_s
         self.max_context_turns = max_context_turns
         self.temperature = temperature
@@ -127,10 +136,28 @@ class OllamaTranslator(TranslationEngine):
             ) from exc
 
         available = [m.get("name", "") for m in tags.get("models", [])]
-        if self.model not in available:
-            # Tolerate a missing ":latest" suffix rather than failing on a detail.
+
+        if self.auto_select:
+            # F-22 auto-detect. `candidate_models` only lists and ranks (10 ms
+            # measured); the real probe is the warm-up generation below, so a
+            # model is loaded at most once instead of once to probe and again to
+            # use. See ai/model_detect.py for the ranking evidence.
+            from ..model_detect import candidate_models, is_discouraged
+            candidates = candidate_models(host=self.host)
+            if not candidates:
+                raise VaaniError(
+                    code=ErrorCode.MODEL_LOAD_FAILED,
+                    message="Ollama is running but has no models. "
+                            "Pull the tested one with `ollama pull phi4-mini`.",
+                    severity=Severity.FATAL, provider_key=self.key,
+                )
+        else:
+            # An explicitly pinned model. Tolerate a missing ":latest" suffix --
+            # that is a spelling detail, not a different model -- but never
+            # substitute a DIFFERENT model for one the user named (AC-22.5).
             bare = self.model.split(":")[0]
-            match = next((m for m in available if m.split(":")[0] == bare), None)
+            match = next((m for m in available
+                          if m == self.model or m.split(":")[0] == bare), None)
             if match is None:
                 raise VaaniError(
                     code=ErrorCode.MODEL_LOAD_FAILED,
@@ -139,15 +166,39 @@ class OllamaTranslator(TranslationEngine):
                     severity=Severity.FATAL, provider_key=self.key,
                     detail={"available": available[:10]},
                 )
-            self.model = match
+            candidates = [match]
+            from ..model_detect import is_discouraged
 
-        # A tiny generation forces the model resident so the first real utterance
-        # does not pay the load cost mid-meeting.
-        try:
-            self._generate("hello", [], "hi", "en", num_predict=8)
-        except VaaniError:
-            pass
-        self._set_health(HealthState.READY, f"{self.model} on {self.host}")
+        # Walk the candidates. The tiny generation forces the model resident so
+        # the first real utterance does not pay the load cost mid-meeting -- and
+        # because it is a real generation, a model that lists but cannot run
+        # (corrupt, too big for this GPU, wedged daemon) fails HERE and we move
+        # to the next one (AC-22.3) instead of failing in the middle of a call.
+        failures: dict[str, str] = {}
+        for candidate in candidates:
+            self.model = candidate
+            try:
+                self._generate("hello", [], "hi", "en", num_predict=8)
+            except VaaniError as exc:
+                failures[candidate] = exc.code.value
+                continue
+            note = ""
+            if is_discouraged(candidate):
+                # E-13: usable, but say plainly that this build measured wrong.
+                note = " (coder-tuned: measured WRONG on dates; prefer phi4-mini)"
+            self._set_health(HealthState.READY,
+                             f"{self.model} on {self.host}{note}")
+            return
+
+        # Every candidate failed. Report them all -- "no usable LLM" without
+        # saying what was tried is the kind of message that wastes an evening.
+        raise VaaniError(
+            code=ErrorCode.MODEL_LOAD_FAILED,
+            message="no usable Ollama model: "
+                    + ", ".join(f"{m} ({why})" for m, why in failures.items()),
+            severity=Severity.FATAL, provider_key=self.key,
+            detail={"tried": failures, "available": available[:10]},
+        )
 
     # --------------------------------------------------------- translation
 

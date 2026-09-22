@@ -18,36 +18,22 @@ import time
 from .engine import SessionConfig, TranslationSession
 from .takeover import TakeoverConfig
 from .takeover_runtime import MeetingTakeoverRuntime
+# The remote-capture loop and its two heuristics now live in `remote_listener`
+# so that `vaani meeting --takeover` can use the same code instead of a second
+# copy that drifts (docs/15-MEETING-UNIFICATION.md §0). They are re-exported
+# here because tests and the Windows runtime already import them from this
+# module, and breaking those imports would be a pointless churn.
+from .remote_listener import (  # noqa: F401  (re-exported for existing callers)
+    RemoteQuestionListener,
+    looks_hesitant,
+    looks_like_question,
+)
 from ..ai.assist import AnswerAssistant
 from ..ai.stt.whisper import FasterWhisperRecognizer
 from ..ai.tts.fallback import FallbackSynthesizer
 from ..ai.translate.ollama import OllamaTranslator
 from ..ai.vad.energy import EnergyVad
-from ..audio.segmenter import SegmenterConfig, UtteranceSegmenter
 from ..core.types import PerformanceMode
-
-
-def looks_like_question(text: str) -> bool:
-    text = text.strip().lower()
-    if not text:
-        return False
-    if "?" in text:
-        return True
-    starters = (
-        "what ", "why ", "how ", "when ", "where ", "who ", "which ",
-        "can you ", "could you ", "would you ", "do you ", "did you ",
-        "are you ", "is there ", "have you ", "will you ",
-    )
-    return text.startswith(starters)
-
-
-def looks_hesitant(text: str) -> bool:
-    words = [w.strip(".,!?;:").lower() for w in text.split() if w]
-    if not words or len(words) > 4:
-        return False
-    return any(w in {"uh", "um", "hmm", "maybe", "actually", "well", "so",
-                       "i", "we", "yes", "no", "right", "okay", "ok"}
-               for w in words)
 
 
 class MeetingTakeoverApp:
@@ -127,28 +113,23 @@ class MeetingTakeoverApp:
     def start(self) -> None:
         try:
             self.session.start()
-            if os.name == "nt":
-                from ..audio.backend.windows_backend import WindowsCaptureStream
-                self._remote = WindowsCaptureStream(
-                    device=self.remote_input_device, sample_rate=16000,
-                    frame_ms=20, stream_name="takeover-remote-in",
-                    include_loopback=True)
-            else:
-                from ..audio.backend.pulse_backend import PulseCaptureStream
-                self._remote = PulseCaptureStream(
-                    device=self.remote_input_device, sample_rate=16000,
-                    frame_ms=20, stream_name="takeover-remote-in")
+            # Shared implementation -- see remote_listener.py. It owns its own
+            # stream and thread, so this class no longer manages either.
+            self._remote = RemoteQuestionListener(
+                device=self.remote_input_device,
+                recognizer=self.session.pipeline.recognizer,
+                on_question=self.runtime.observe_remote_question,
+                performance_mode=self.session.config.performance_mode,
+                on_error=lambda msg: print(f"[TAKEOVER] {msg}"))
+            self._remote.start()
             self.stop_event.clear()
-            self._thread = threading.Thread(target=self._remote_loop,
-                                             name="vaani-takeover-remote", daemon=True)
             self._monitor_thread = threading.Thread(target=self._user_signal_loop,
                                                     name="vaani-takeover-user-signals", daemon=True)
-            self._thread.start()
             self._monitor_thread.start()
         except Exception:
             self.stop_event.set()
             if self._remote is not None:
-                self._remote.close()
+                self._remote.stop()
                 self._remote = None
             if self.session is not None:
                 try:
@@ -161,41 +142,13 @@ class MeetingTakeoverApp:
         self.stop_event.set()
         self.runtime.stop()
         if self._remote is not None:
-            self._remote.close()
+            self._remote.stop()
             self._remote = None
-        for t in (self._thread, self._monitor_thread):
-            if t is not None:
-                t.join(timeout=2.0)
+        if self._monitor_thread is not None:
+            self._monitor_thread.join(timeout=2.0)
         self._thread = self._monitor_thread = None
         if self.session is not None:
             self.session.stop()
-
-    def _remote_loop(self) -> None:
-        recognizer = self.session.pipeline.recognizer
-        segmenter = UtteranceSegmenter(
-            config=SegmenterConfig.for_mode(self.session.config.performance_mode),
-            sample_rate=16000, frame_ms=20)
-        vad = EnergyVad()
-        while not self.stop_event.is_set():
-            try:
-                frame = self._remote.read_frame()
-                segment = segmenter.push(frame, vad.is_speech(frame))
-            except Exception as exc:
-                if not self.stop_event.is_set():
-                    print(f"[TAKEOVER] remote audio stopped: {exc}")
-                return
-            if segment is None:
-                continue
-            try:
-                transcript = recognizer.transcribe(segment.audio, 16000)
-            except Exception as exc:
-                if not self.stop_event.is_set():
-                    print(f"[TAKEOVER] remote STT error: {exc}")
-                continue
-            text = transcript.text.strip()
-            if not looks_like_question(text):
-                continue
-            self.runtime.observe_remote_question(text)
 
     def _user_signal_loop(self) -> None:
         while not self.stop_event.is_set():
