@@ -20,11 +20,37 @@ from collections.abc import Callable
 from pathlib import Path
 
 #: Fixed command vocabulary. Anything else is rejected.
+#:
+#: The three `takeover-*` verbs are the control surface for F-21
+#: (docs/15-MEETING-UNIFICATION.md §2.3). They exist here rather than as GUI
+#: buttons for the same Wayland reason as the rest: during a meeting the focus is
+#: on Zoom, so the only shortcut that can reach us is one KDE/GNOME binds to a
+#: COMMAND. "Vaani, take over" also works, but it is spoken into the call --
+#: `takeover-now` is the silent way to do it.
+#:
+#: Note `panic` still outranks all of them: it emergency-stops the session, which
+#: flushes queued audio, including a takeover answer that is mid-sentence.
 COMMANDS = frozenset({"show", "hide", "toggle", "pause", "resume", "mute",
-                      "unmute", "panic", "status", "quit"})
+                      "unmute", "panic", "status", "quit",
+                      "takeover-arm", "takeover-stop", "takeover-now",
+                      # Phase 2 meeting controls. `bypass` puts the user's real
+                      # voice on the virtual mic; `talk` is push-to-talk; `mode`
+                      # switches between always-on and the two PTT flavours.
+                      "bypass-on", "bypass-off", "bypass", "talk",
+                      "mode-always-on", "mode-ptt-toggle", "mode-ptt-hold",
+                      # Phase 4 Takeover A: finish the user's own point.
+                      # `cancel` is separate from `takeover-stop` on purpose --
+                      # it stops Vaani speaking RIGHT NOW without changing
+                      # whether takeover stays armed, which is what someone
+                      # reaching for a cancel key in a meeting means.
+                      "continue", "continue-arm", "continue-off", "cancel"})
 
 
-def socket_path() -> Path:
+from typing import Union
+
+def socket_path() -> Union[Path, tuple[str, int]]:
+    if os.name == 'nt':
+        return ('127.0.0.1', 18923)
     base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/vaani-{os.getuid()}"
     return Path(base) / "vaani.sock"
 
@@ -40,22 +66,32 @@ class ControlServer:
         self._stop = threading.Event()
 
     def start(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # A stale socket from a crash would block bind(); it is safe to remove
-        # because connect() below would have failed on it anyway.
-        if self.path.exists():
+        if os.name != 'nt':
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.exists():
+                try:
+                    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    probe.settimeout(0.2)
+                    probe.connect(str(self.path))
+                    probe.close()
+                    raise RuntimeError("another Vaani instance is already running")
+                except (ConnectionRefusedError, socket.timeout, OSError):
+                    self.path.unlink(missing_ok=True)
+            self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._sock.bind(str(self.path))
+            os.chmod(self.path, 0o600)
+        else:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                probe.settimeout(0.2)
-                probe.connect(str(self.path))
-                probe.close()
-                raise RuntimeError("another Vaani instance is already running")
-            except (ConnectionRefusedError, socket.timeout, OSError):
-                self.path.unlink(missing_ok=True)
+                self._sock.bind(self.path)
+            except OSError as err:
+                # WHY `from err`: the bind almost always fails with EADDRINUSE
+                # (a second Vaani), but it can also fail for a permission or
+                # network-stack reason. Chaining keeps the real errno in the
+                # traceback so a mis-diagnosed "already running" is debuggable.
+                raise RuntimeError(
+                    "another Vaani instance is already running") from err
 
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.bind(str(self.path))
-        os.chmod(self.path, 0o600)
         self._sock.listen(4)
         self._sock.settimeout(0.5)
         self._thread = threading.Thread(target=self._serve, daemon=True,
@@ -92,18 +128,26 @@ class ControlServer:
                 self._sock.close()
             except OSError:
                 pass
-        self.path.unlink(missing_ok=True)
+        if os.name != 'nt':
+            self.path.unlink(missing_ok=True)
 
 
 def send(command: str, *, timeout: float = 2.0) -> dict:
     """Send one command to a running instance. Raises if none is listening."""
     path = socket_path()
-    if not path.exists():
-        raise ConnectionError("Vaani is not running")
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    if os.name == 'nt':
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    else:
+        if not path.exists():
+            raise ConnectionError("Vaani is not running")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+
     sock.settimeout(timeout)
     try:
-        sock.connect(str(path))
+        if os.name == 'nt':
+            sock.connect(path)
+        else:
+            sock.connect(str(path))
         sock.sendall(command.encode())
         return json.loads(sock.recv(4096).decode() or "{}")
     finally:

@@ -16,11 +16,11 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from collections.abc import Callable
 
 from ..core.latency_monitor import BUDGET_MS
 from ..core.state_machine import SessionState
 from ..core.types import PerformanceMode
+from ..session.input_mode import InputMode
 from .components import (
     Banner,
     Button,
@@ -48,6 +48,10 @@ class VaaniApp:
         self.session = None
         self._events: queue.Queue = queue.Queue()
         self._screens: dict[str, tk.Frame] = {}
+        # Set by the Dashboard's switch, read by _start_worker. Lives on the
+        # app rather than the screen so a session started from anywhere gets
+        # the same answer.
+        self.input_mode = InputMode.ALWAYS_ON
         self._nav_buttons: dict[str, tk.Label] = {}
         self._current = "dashboard"
 
@@ -74,7 +78,8 @@ class VaaniApp:
         self.privacy_label.pack(anchor="w", padx=SPACE["lg"], pady=(0, SPACE["xl"]))
 
         for key, label in (("dashboard", "Dashboard"), ("meeting", "Meeting Mode"),
-                           ("voice", "Voice Profile"), ("settings", "Settings"),
+                           ("voice", "Voice Profile"), ("script", "Script Mode"),
+                           ("settings", "Settings"),
                            ("diagnostics", "Diagnostics")):
             item = tk.Label(self.rail, text=label, bg=p.bg_surface,
                             fg=p.text_secondary, font=font("body"), anchor="w",
@@ -96,6 +101,7 @@ class VaaniApp:
         self._screens["dashboard"] = DashboardScreen(self.content, self)
         self._screens["meeting"] = MeetingScreen(self.content, self)
         self._screens["voice"] = VoiceScreen(self.content, self)
+        self._screens["script"] = ScriptScreen(self.content, self)
         self._screens["settings"] = SettingsScreen(self.content, self)
         self._screens["diagnostics"] = DiagnosticsScreen(self.content, self)
 
@@ -199,8 +205,37 @@ class VaaniApp:
             free = free_vram_mb()
             placement = ", ".join(f"{s}={resolve_device(s)}"
                                   for s in ("stt", "translation", "tts"))
-            checks["Models"] = (True, placement + (f"  ({free} MiB free)"
-                                                   if free is not None else ""))
+
+            # WHICH models, not just which device. Phase 3 made auto-detection
+            # explain itself on the CLI (`vaani models`); showing only
+            # "stt=cuda" here left the GUI unable to answer the question the
+            # user actually has - "what is it using, and is that the good one?"
+            detail = [placement]
+            try:
+                from ..ai.stt.whisper import FasterWhisperRecognizer
+                recognizer = FasterWhisperRecognizer.for_mode(
+                    PerformanceMode.BALANCED)
+                cached = "" if recognizer.is_cached() else " (not downloaded)"
+                detail.append(f"whisper {recognizer.model_size}{cached}")
+            except Exception:
+                pass
+            ok = True
+            try:
+                from ..ai.model_detect import resolve_llm_model
+                choice = resolve_llm_model()
+                if choice.ok:
+                    warn = "  DISCOURAGED build" if choice.discouraged else ""
+                    detail.append(f"llm {choice.name}{warn}")
+                    # A coder/embed build is usable but measured wrong on dates,
+                    # so the card should ask for attention rather than read green.
+                    ok = not choice.discouraged
+                else:
+                    detail.append("no local LLM (NLLB only)")
+            except Exception:
+                pass
+            if free is not None:
+                detail.append(f"{free} MiB VRAM free")
+            checks["Models"] = (ok, " · ".join(detail))
         except Exception as exc:
             checks["Models"] = (False, str(exc)[:60])
         return checks
@@ -251,7 +286,11 @@ class VaaniApp:
             session = TranslationSession(
                 recognizer=recognizer, translator=translator,
                 synthesizer=synthesizer, vad=EnergyVad(),
-                config=SessionConfig(voice_profile_id=profile_id),
+                # Chosen on the Dashboard before Start. Read here rather than
+                # defaulted, so the switch the user just set actually applies
+                # to the session they are starting.
+                config=SessionConfig(voice_profile_id=profile_id,
+                                     input_mode=self.input_mode),
                 on_result=lambda r: self.post("result", r),
                 on_state=lambda a, b: self.post("state", b),
                 on_latency_warning=lambda w: self.post("latency_warning", w))
@@ -312,9 +351,47 @@ class DashboardScreen(tk.Frame):
             detail.pack(anchor="w", pady=(SPACE["xs"], 0))
             self.cards[name] = (card, pill, detail)
 
+        # Input mode, chosen BEFORE starting. WHY here and not only on the
+        # Meeting screen: always_on means the meeting hears you from the
+        # moment you press Start, and that is a decision worth making
+        # deliberately rather than discovering.
+        mode_card = Card(self, p, title="How you talk")
+        mode_card.pack(fill="x", pady=(0, SPACE["md"]))
+        self._mode_var = tk.StringVar(value=InputMode.ALWAYS_ON.value)
+        for mode, label, blurb in (
+            (InputMode.ALWAYS_ON, "Always on",
+             "everything you say is translated (default)"),
+            (InputMode.PTT_TOGGLE, "Push to talk (toggle)",
+             "press a key to go live, press again to stop"),
+            (InputMode.PTT_HOLD, "Push to talk (hold)",
+             "live only while held - needs evdev + the 'input' group"),
+        ):
+            row = tk.Frame(mode_card.body, bg=p.bg_surface)
+            row.pack(fill="x", anchor="w")
+            tk.Radiobutton(
+                row, text=label, value=mode.value, variable=self._mode_var,
+                command=self._on_mode_change,
+                bg=p.bg_surface, fg=p.text_primary, selectcolor=p.bg_raised,
+                activebackground=p.bg_surface, activeforeground=p.text_primary,
+                font=font("body"), anchor="w", highlightthickness=0,
+                borderwidth=0).pack(side="left")
+            tk.Label(row, text=blurb, bg=p.bg_surface, fg=p.text_secondary,
+                     font=font("label")).pack(side="left", padx=(SPACE["sm"], 0))
+
         self.start = Button(self, p, "Start Translation", app.start_session,
                             variant="primary", size="lg")
         self.start.pack(anchor="w", pady=SPACE["xl"])
+
+    def _on_mode_change(self) -> None:
+        """Push the choice onto the app.
+
+        Applies to the NEXT session, and to a running one where it can: the
+        session owns an InputModeController that accepts a mid-session switch.
+        """
+        self.app.input_mode = InputMode(self._mode_var.get())
+        session = self.app.session
+        if session is not None:
+            session.set_input_mode(self.app.input_mode)
 
     def update_readiness(self, checks: dict[str, tuple[bool, str]]) -> None:
         p = self.app.palette
@@ -556,8 +633,18 @@ class VoiceScreen(tk.Frame):
             self.app.root.after(0, lambda: self.app.banner.show(
                 "Played a sample in your voice.", "info"))
         except Exception as exc:
-            self.app.root.after(0, lambda: self.app.banner.show(
-                f"Could not test the voice: {exc}", "error"))
+            # WHY the str() and the default argument: Python unbinds `exc` the
+            # moment this except block ends, but `root.after(0, ...)` defers the
+            # lambda to the next tkinter loop iteration - by then a late-bound
+            # `exc` is gone and the lambda dies with NameError, so the user is
+            # told nothing and the voice-test failure is silently swallowed.
+            # Flattening to a string here, and binding it as a default arg,
+            # captures the value at raise time instead of at call time.
+            # WHERE IT GOES NEXT: the banner widget, on the tkinter main thread
+            # (this method runs on a worker thread, which is why it must defer).
+            message = str(exc)
+            self.app.root.after(0, lambda msg=message: self.app.banner.show(
+                f"Could not test the voice: {msg}", "error"))
 
     def _delete(self, profile_id: str) -> None:
         from ..voice.enrollment import VoiceProfileStore
@@ -568,6 +655,147 @@ class VoiceScreen(tk.Frame):
             self.app.banner.show(f"Could not delete: {exc}", "error")
         self.render()
         self.app.refresh_readiness()
+
+
+class ScriptScreen(tk.Frame):
+    """Offline script mode: a recording in, an English script out.
+
+    WHY IT IS ITS OWN SCREEN rather than a mode of the Meeting screen: nothing
+    here is live. There is no latency to watch, no virtual microphone, and no
+    meeting to be embarrassed in front of. The only things that matter are
+    which file, where the output goes, and how far along it is - and a long run
+    needs progress far more than a live session does, because it can take
+    minutes with nothing else on screen changing.
+    """
+
+    def __init__(self, parent, app: VaaniApp):
+        super().__init__(parent, bg=app.palette.bg_base)
+        self.app, p = app, app.palette
+        self._thread = None
+
+        tk.Label(self, text="Script Mode", bg=p.bg_base, fg=p.text_primary,
+                 font=font("title")).pack(anchor="w")
+        tk.Label(self, text="Turn a Hindi/Hinglish recording into an English "
+                            "script you can read. For presentation prep.",
+                 bg=p.bg_base, fg=p.text_secondary, font=font("body")).pack(
+                     anchor="w", pady=(0, SPACE["lg"]))
+
+        card = Card(self, p, title="Recording")
+        card.pack(fill="x", pady=(0, SPACE["md"]))
+        row = tk.Frame(card.body, bg=p.bg_surface)
+        row.pack(fill="x")
+        self._path_var = tk.StringVar(value="")
+        tk.Entry(row, textvariable=self._path_var, bg=p.bg_raised,
+                 fg=p.text_primary, insertbackground=p.text_primary,
+                 font=font("body"), relief="flat").pack(
+                     side="left", fill="x", expand=True, ipady=6)
+        Button(row, p, "Choose…", self._choose).pack(side="left",
+                                                     padx=(SPACE["sm"], 0))
+        tk.Label(card.body, text="wav, flac, ogg, mp3 - any sample rate; "
+                                 "stereo is mixed to mono automatically",
+                 bg=p.bg_surface, fg=p.text_secondary,
+                 font=font("label")).pack(anchor="w", pady=(SPACE["xs"], 0))
+
+        self.run_button = Button(self, p, "Create Script", self._run,
+                                 variant="primary", size="lg")
+        self.run_button.pack(anchor="w", pady=(0, SPACE["md"]))
+
+        self.status = tk.Label(self, text="", bg=p.bg_base, fg=p.text_secondary,
+                               font=font("body"), anchor="w", justify="left",
+                               wraplength=620)
+        self.status.pack(anchor="w", fill="x")
+
+        self.output = tk.Text(self, height=16, bg=p.bg_surface,
+                              fg=p.text_primary, font=font("body"),
+                              relief="flat", wrap="word",
+                              insertbackground=p.text_primary)
+        self.output.pack(fill="both", expand=True, pady=(SPACE["md"], 0))
+
+    def _choose(self) -> None:
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Choose a recording",
+            filetypes=[("Audio", "*.wav *.flac *.ogg *.mp3 *.m4a"),
+                       ("All files", "*.*")])
+        if path:
+            self._path_var.set(path)
+
+    def _run(self) -> None:
+        path = self._path_var.get().strip()
+        if not path:
+            self.app.banner.show("Choose a recording first.", "error")
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return              # already running; re-entry would double-run it
+        self.run_button.set_enabled(False)
+        self.output.delete("1.0", "end")
+        self._set_status("Loading models…")
+        # Transcribing takes minutes. On the Tk thread it would freeze the whole
+        # window, including this progress label - the one thing telling the user
+        # it has not died.
+        self._thread = threading.Thread(target=self._worker, args=(path,),
+                                        daemon=True)
+        self._thread.start()
+
+    def _set_status(self, text: str) -> None:
+        self.app.root.after(0, lambda: self.status.configure(text=text))
+
+    def _worker(self, path: str) -> None:
+        try:
+            from pathlib import Path as _Path
+
+            from ..ai.stt.whisper import FasterWhisperRecognizer
+            from ..ai.translate.nllb import NllbTranslator
+            from ..cli import _load_audio_16k_mono
+            from ..session.script_mode import ScriptJob
+
+            audio, sample_rate = _load_audio_16k_mono(_Path(path))
+            if audio.size == 0:
+                self._set_status("That file has no audio in it.")
+                return
+
+            recognizer = FasterWhisperRecognizer.for_mode(PerformanceMode.BALANCED)
+            if not recognizer.is_cached():
+                self._set_status("Downloading the speech model - this happens "
+                                 "once and can take several minutes…")
+            recognizer.warmup()
+            translator = NllbTranslator()
+            translator.warmup()
+
+            out_path = _Path(path).with_suffix(".script.txt")
+            job = ScriptJob(audio=audio, sample_rate=sample_rate,
+                            recognizer=recognizer, translator=translator,
+                            checkpoint_path=out_path.with_suffix(
+                                ".progress.json"))
+
+            def progress(done, total, segment):
+                note = "  (low confidence)" if segment.uncertain else ""
+                if segment.error:
+                    note = f"  ERROR: {segment.error}"
+                self._set_status(f"Chunk {done} of {total}{note}")
+
+            result = job.run(progress=progress)
+            script = result.script_text()
+            out_path.write_text(script + "\n", encoding="utf-8")
+
+            def finish() -> None:
+                self.output.delete("1.0", "end")
+                self.output.insert("1.0", script)
+                uncertain = sum(1 for s in result.segments if s.uncertain)
+                bits = [f"Saved to {out_path}"]
+                if uncertain:
+                    # Said plainly: [?] means Whisper was unsure, and Whisper
+                    # invents plausible text when it cannot hear properly.
+                    bits.append(f"{uncertain} passage(s) marked [?] - check those")
+                if result.failed_chunks:
+                    bits.append(f"{result.failed_chunks} chunk(s) FAILED")
+                self.status.configure(text="  ·  ".join(bits))
+            self.app.root.after(0, finish)
+        except Exception as exc:
+            message = str(exc)
+            self._set_status(f"Could not create the script: {message}")
+        finally:
+            self.app.root.after(0, lambda: self.run_button.set_enabled(True))
 
 
 class SettingsScreen(tk.Frame):

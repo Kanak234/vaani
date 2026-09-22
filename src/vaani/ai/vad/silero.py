@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from ...core.errors import ErrorCode, Severity, VaaniError
+from ...system.platform import data_dir
 
 _MODEL_URL = (
     "https://raw.githubusercontent.com/snakers4/silero-vad/master/"
@@ -159,6 +160,4 @@ class SileroVad:
 
 
 def _default_model_path() -> Path:
-    import os
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "vaani" / "models" / "silero_vad.onnx"
+    return data_dir() / "models" / "silero_vad.onnx"

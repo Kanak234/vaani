@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+    echo "Removing Vaani environment..."
+    rm -f /usr/local/bin/vaani
+    rm -rf /opt/vaani/.venv
+    
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q /usr/share/icons/hicolor
+    fi
+fi
+
+exit 0

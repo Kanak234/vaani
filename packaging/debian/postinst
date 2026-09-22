@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    echo "Setting up Vaani environment..."
+    python3 -m venv /opt/vaani/.venv
+    /opt/vaani/.venv/bin/pip install --no-index --find-links=/opt/vaani/wheels /opt/vaani 2>/dev/null || /opt/vaani/.venv/bin/pip install -e /opt/vaani
+    
+    ln -sf /opt/vaani/.venv/bin/vaani /usr/local/bin/vaani
+    
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q /usr/share/icons/hicolor
+    fi
+fi
+
+exit 0

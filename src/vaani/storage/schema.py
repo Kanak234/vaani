@@ -66,7 +66,7 @@ _MIGRATIONS: dict[int, list[str]] = {
             id                    INTEGER PRIMARY KEY AUTOINCREMENT,
             uuid                  TEXT    NOT NULL UNIQUE,
             mode                  TEXT    NOT NULL
-                                  CHECK (mode IN ('meeting','conversation','diagnostic')),
+                                  CHECK (mode IN ('meeting','conversation','diagnostic','takeover')),
             voice_profile_id      INTEGER NULL
                                   REFERENCES voice_profiles(id) ON DELETE SET NULL,
             source_language_mode  TEXT    NOT NULL DEFAULT 'auto',
@@ -187,7 +187,7 @@ _MIGRATIONS: dict[int, list[str]] = {
             device_key    TEXT    NOT NULL UNIQUE,
             kind          TEXT    NOT NULL,
             display_name  TEXT    NOT NULL,
-            backend       TEXT    NOT NULL DEFAULT 'pipewire',
+            backend       TEXT    NOT NULL DEFAULT 'auto',
             channels      INTEGER NULL,
             sample_rate   INTEGER NULL,
             is_virtual    INTEGER NOT NULL DEFAULT 0,

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import re
 
-from ...core.errors import ErrorCode, Severity, VaaniError
+from ...core.errors import ErrorCode, VaaniError
 from ...core.types import Translation
 from ..base import HealthState, TranslationEngine
 
@@ -115,7 +115,7 @@ class RoutingTranslator(TranslationEngine):
 
     def choose_engine(self, text: str, source_language: str):
         """Pick the engine and say why. Separated so it is directly testable."""
-        if source_language != "en" and is_romanised_hindi(text):
+        if is_romanised_hindi(text):
             if self.accurate is not None:
                 return self.accurate, "accurate"
             return self.fast, "fallback"

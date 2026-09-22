@@ -68,6 +68,25 @@ class MeetingOverlay:
                                  justify="left")
         self.line_out.pack(fill="x", padx=SPACE["md"])
 
+        # F-21 takeover badge (docs/15 §2.2). Packed into the HEADER, next to
+        # the state pill, so it sits in the one place the eye already goes.
+        # Hidden entirely when OFF rather than shown greyed out: an always-present
+        # "TAKEOVER" label would train the user to stop reading it, and the whole
+        # point is that they notice when Vaani is allowed to speak for them.
+        self.takeover_badge = tk.Label(header, text="", bg=p.bg_surface,
+                                       fg=p.text_muted, font=font("label"))
+        self._takeover_state = "off"
+
+        # Input-mode badge. WHY it is always visible rather than shown only in
+        # the non-default states: the user needs to answer "is the meeting
+        # hearing my translation, my real voice, or nothing?" at a glance, and
+        # an absent badge is ambiguous between "normal" and "the overlay is
+        # broken". BYPASS is red because the room is hearing untranslated Hindi.
+        self.input_badge = tk.Label(header, text="LIVE", bg=p.bg_surface,
+                                    fg=p.text_muted, font=font("label"))
+        self.input_badge.pack(side="left", padx=(SPACE["sm"], 0))
+        self._input_mode = "LIVE"
+
         controls = tk.Frame(self.win, bg=p.bg_surface)
         controls.pack(fill="x", padx=SPACE["md"], pady=SPACE["sm"])
         self._mini(controls, "Hide", self.hide).pack(side="left")
@@ -120,14 +139,28 @@ class MeetingOverlay:
         self._visible = True
 
     def hide(self) -> None:
-        """Vanish completely — no window, no taskbar entry.
+        """Vanish completely - no window, no taskbar entry.
 
         Translation keeps running. This hides the interface, not the engine.
+
+        REFUSES WHILE VAANI IS SPEAKING FOR THE USER. The requirement is that a
+        clear on-screen indicator shows when the AI is talking instead of the
+        user; an indicator that can be dismissed while it is true is not an
+        indicator. Before this, `vaani hide` during an active takeover left the
+        user with their own cloned voice in a meeting and nothing on screen
+        saying so.
+
+        Returns without hiding rather than raising: a refused hotkey should be
+        a no-op, not a crash.
         """
+        if self._takeover_state == "active":
+            return
         self.win.withdraw()
         self._visible = False
 
     def toggle(self) -> bool:
+        # hide() self-censors during an active takeover, so toggle inherits
+        # that guarantee rather than restating it.
         self.hide() if self._visible else self.show()
         return self._visible
 
@@ -139,6 +172,59 @@ class MeetingOverlay:
             text=f"{latency_ms:.0f} ms" if latency_ms else "—",
             fg=state_colour(self.palette, state) if latency_ms else
             self.palette.text_muted)
+
+    def set_takeover(self, state: str) -> None:
+        """Show whether Vaani is currently allowed to speak for the user.
+
+        `state` is a `TakeoverState` value: "off", "armed" or "active". Called
+        from the meeting loop's Tk thread via `root.after`, so it must stay cheap
+        and must never raise -- a badge failing is not worth killing a meeting
+        for, which is why the lookup has a default rather than an index error.
+
+        Colour follows the same warn/error semantics as the rest of the overlay:
+        ARMED is a warning (it COULD speak), ACTIVE is red (it IS speaking).
+        """
+        if state == self._takeover_state:
+            return                      # avoid needless Tk work every poll tick
+        self._takeover_state = state
+        # FORCE THE OVERLAY UP when Vaani starts speaking for the user. The
+        # overlay is normally hidden in meeting mode, so without this the AI
+        # could speak in the user's cloned voice with nothing on screen at all.
+        # Raising it is deliberately not conditional on `self._visible`: the
+        # whole point is to override the user's earlier "hide".
+        if state == "active":
+            self.show()
+        p = self.palette
+        label, colour = {
+            "armed": ("● TAKEOVER ARMED", p.state_warn),
+            "active": ("● TAKEOVER ACTIVE", p.state_error),
+        }.get(state, ("", p.text_muted))
+        self.takeover_badge.configure(text=label, fg=colour)
+        if label:
+            self.takeover_badge.pack(side="left", padx=(SPACE["sm"], 0))
+        else:
+            self.takeover_badge.pack_forget()
+
+    def set_input_mode(self, label: str) -> None:
+        """Show whether the meeting is hearing the translation, the user's own
+        voice, or nothing.
+
+        `label` comes straight from InputState.label ("LIVE" / "BYPASS" /
+        "MUTED") rather than being recomputed here, so the badge cannot
+        disagree with what the audio path is actually doing.
+
+        Same contract as set_takeover: called from the meeting loop's Tk thread
+        via root.after, cheap, and never raises - the colour lookup has a
+        default instead of a KeyError.
+        """
+        if label == self._input_mode:
+            return                      # no needless Tk work on every poll
+        self._input_mode = label
+        p = self.palette
+        colour = {"BYPASS": p.state_error,      # the room hears raw Hindi
+                  "MUTED": p.text_muted,
+                  "LIVE": p.text_muted}.get(label, p.text_muted)
+        self.input_badge.configure(text=label, fg=colour)
 
     def set_lines(self, source: str, output: str, *, suppressed: bool = False) -> None:
         p = self.palette

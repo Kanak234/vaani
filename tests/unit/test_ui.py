@@ -10,6 +10,8 @@ import os
 
 import pytest
 
+from vaani.session.input_mode import InputMode
+
 from vaani.ui.theme import (
     DARK,
     LIGHT,
@@ -20,8 +22,19 @@ from vaani.ui.theme import (
     state_colour,
 )
 
-HAS_DISPLAY = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-needs_display = pytest.mark.skipif(not HAS_DISPLAY, reason="no display")
+def _check_display() -> bool:
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    try:
+        import tkinter as _tk
+        _root = _tk.Tk()
+        _root.destroy()
+        return True
+    except Exception:
+        return False
+
+HAS_DISPLAY = _check_display()
+needs_display = pytest.mark.skipif(not HAS_DISPLAY, reason="no usable display")
 
 
 # --- design tokens ----------------------------------------------------------
@@ -86,12 +99,16 @@ def test_dark_is_the_default_palette():
 # --- rendering --------------------------------------------------------------
 
 @needs_display
-def test_app_builds_all_five_screens():
+def test_app_builds_every_screen():
+    """Exact set, not a subset: a screen that exists but is not in the rail is
+    unreachable, and one in the rail that does not exist crashes on click."""
     from vaani.ui.app import VaaniApp
     app = VaaniApp()
     try:
-        assert set(app._screens) == {"dashboard", "meeting", "voice", "settings",
-                                     "diagnostics"}
+        expected = {"dashboard", "meeting", "voice", "script", "settings",
+                    "diagnostics"}
+        assert set(app._screens) == expected
+        assert set(app._nav_buttons) == expected
     finally:
         app.root.destroy()
 
@@ -326,5 +343,153 @@ def test_enrollment_progress_counts_speech_not_wall_clock():
         d._tick(0.05)
         assert "12 s of speech" in d.progress["text"]
         d._cancel()
+    finally:
+        app.root.destroy()
+
+
+# --- the AI-speaking indicator (Phase 4) ------------------------------------
+#
+# The requirement is that a clear on-screen indicator shows when Vaani is
+# speaking INSTEAD OF the user. An indicator that can be dismissed while it is
+# true is not an indicator, so these cover both directions: it forces itself
+# up, and it refuses to go away.
+
+def _overlay():
+    """Helper, not a test - the skip marker belongs on the tests below."""
+    import tkinter as tk
+
+    from vaani.ui.overlay import MeetingOverlay
+    root = tk.Tk()
+    root.withdraw()
+    return root, MeetingOverlay(root, start_hidden=True)
+
+
+@needs_display
+def test_takeover_going_active_forces_a_hidden_overlay_into_view():
+    """Meeting mode runs hidden by default, so without this the AI could speak
+    in the user's cloned voice with nothing on screen at all."""
+    root, overlay = _overlay()
+    try:
+        overlay.hide()
+        assert overlay.visible is False
+        overlay.set_takeover("active")
+        assert overlay.visible is True
+    finally:
+        root.destroy()
+
+
+@needs_display
+def test_the_overlay_refuses_to_hide_while_vaani_is_speaking_for_the_user():
+    """`vaani hide` during an active takeover used to leave the user with
+    their own cloned voice in a meeting and no indication of it."""
+    root, overlay = _overlay()
+    try:
+        overlay.set_takeover("active")
+        overlay.hide()
+        assert overlay.visible is True      # refused
+    finally:
+        root.destroy()
+
+
+@needs_display
+def test_hiding_works_again_once_the_takeover_ends():
+    """The guarantee is scoped to "while speaking", not permanent."""
+    root, overlay = _overlay()
+    try:
+        overlay.set_takeover("active")
+        overlay.hide()
+        assert overlay.visible is True
+        overlay.set_takeover("off")
+        overlay.hide()
+        assert overlay.visible is False
+    finally:
+        root.destroy()
+
+
+@needs_display
+def test_armed_is_not_active_and_may_still_be_hidden():
+    """ARMED means it COULD speak, not that it IS. Forcing the overlay up for
+    merely-armed would make the indicator meaningless through overuse."""
+    root, overlay = _overlay()
+    try:
+        overlay.set_takeover("armed")
+        overlay.hide()
+        assert overlay.visible is False
+    finally:
+        root.destroy()
+
+
+# --- dashboard input mode, model status, Script screen (Phase 6) ------------
+
+def _app():
+    from vaani.ui.app import VaaniApp
+    app = VaaniApp()
+    app.root.withdraw()
+    return app
+
+
+@needs_display
+def test_the_script_screen_exists_and_is_reachable():
+    """Offline script mode had a CLI and no GUI at all."""
+    app = _app()
+    try:
+        assert "script" in app._screens
+        assert "script" in app._nav_buttons      # reachable from the rail
+        app.show("script")
+        app.root.update_idletasks()
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_the_dashboard_defaults_to_always_on():
+    """The default must be the one that needs no key: in a normal meeting the
+    user just talks."""
+    app = _app()
+    try:
+        assert app.input_mode is InputMode.ALWAYS_ON
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_choosing_an_input_mode_reaches_the_app():
+    """The switch has to affect the session that Start will create, not just
+    move a radio button."""
+    app = _app()
+    try:
+        dashboard = app._screens["dashboard"]
+        for mode in (InputMode.PTT_HOLD, InputMode.PTT_TOGGLE,
+                     InputMode.ALWAYS_ON):
+            dashboard._mode_var.set(mode.value)
+            dashboard._on_mode_change()
+            assert app.input_mode is mode
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_switching_mode_with_no_session_does_not_crash():
+    """The Dashboard is where you are BEFORE starting, so no session is the
+    normal case."""
+    app = _app()
+    try:
+        assert app.session is None
+        dashboard = app._screens["dashboard"]
+        dashboard._mode_var.set(InputMode.PTT_TOGGLE.value)
+        dashboard._on_mode_change()
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_the_models_card_names_the_models_not_just_the_device():
+    """"stt=cuda" cannot answer the question the user actually has, which is
+    "what is it using, and is that the good one?"."""
+    app = _app()
+    try:
+        ok, text = app.readiness()["Models"]
+        assert isinstance(ok, bool)
+        assert "whisper" in text.lower()
     finally:
         app.root.destroy()

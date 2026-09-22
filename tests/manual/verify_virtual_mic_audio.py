@@ -49,7 +49,6 @@ def main() -> int:
 
         # Record from the virtual mic exactly as a meeting client would.
         print("\n[3] Recording FROM the virtual mic (as Zoom/Meet would)...")
-        rec_seconds = dur + 1.2
         proc = subprocess.Popen(
             ["parec", "--device", mic.node_name, "--format=s16le",
              "--rate", str(SR), "--channels=1", "--latency-msec=20"],

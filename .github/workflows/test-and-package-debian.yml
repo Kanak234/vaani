@@ -1,0 +1,45 @@
+name: Debian Test & Package
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev python3-tk xvfb libpulse0
+
+      - name: Run Test Suite
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[stt,translate]" pytest
+          bash scripts/test_release.sh
+          bash scripts/smoke_test.sh
+
+      - name: Build Debian Package
+        run: |
+          bash scripts/build_debian.sh
+
+      - name: Upload Debian Package Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaani-debian-package
+          path: release/debian/

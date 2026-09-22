@@ -79,7 +79,7 @@ class FallbackSynthesizer(VoiceSynthesizer):
                 f1, f2 = _VOWELS[low]
                 out.append(self._voiced(f1, f2, char_s * 1.4, phrase_pos))
                 phrase_pos += char_s * 1.4
-            elif low.isalpha():
+            elif low.isalpha() and low.isascii():
                 voiced = low in _VOICED
                 out.append(self._consonant(char_s * 0.7, voiced, phrase_pos))
                 phrase_pos += char_s * 0.7

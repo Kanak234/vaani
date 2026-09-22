@@ -124,3 +124,94 @@ def test_overall_accuracy_does_not_regress(engine):
     """Measured baseline: 12/14 (86%). Fail if it drops below that."""
     passed = sum(1 for c in CASES if _check(c, _translate(engine, c).text))
     assert passed >= 12, f"accuracy regressed to {passed}/{len(CASES)}"
+
+
+# --- offline script mode (Phase 5) ------------------------------------------
+#
+# WHY THIS IS HERE rather than in tests/unit/test_script_mode.py: the unit
+# tests stub the translator, and a stub accepts ANY source_language string.
+# That is exactly how script mode shipped its first bug - it passed
+# source_language="auto", which the real NLLB translator rejects with
+# LANGID_UNSUPPORTED, so every chunk of a real run failed while every unit
+# test passed. Only the real provider can catch that class of mistake.
+
+def test_script_mode_translates_fixtures_with_the_real_translator():
+    """Drive ScriptJob's own code path with a real translator.
+
+    The recognizer is stubbed (this is about translation, and real Whisper
+    would need real audio), but it returns a genuine Transcript carrying a
+    real language_distribution - which is what ScriptJob reads to decide the
+    source language.
+    """
+    import numpy as np
+
+    from vaani.ai.translate.nllb import NllbTranslator
+    from vaani.core.types import Transcript
+    from vaani.session.script_mode import ScriptConfig, ScriptJob
+
+    cases = [c for c in CASES if c.register == "devanagari"][:3]
+    if not cases:
+        pytest.skip("no Devanagari fixtures")
+
+    class FixtureRecognizer:
+        """Returns one fixture per chunk, in order."""
+
+        def __init__(self, texts):
+            self.texts = list(texts)
+            self.index = 0
+
+        def transcribe(self, audio, sample_rate, *, language_hint=None,
+                       context_prompt=None):
+            text = self.texts[min(self.index, len(self.texts) - 1)]
+            self.index += 1
+            return Transcript(text=text, language_distribution={"hi": 1.0},
+                              confidence=0.9)
+
+    translator = NllbTranslator()
+    translator.warmup()
+
+    # One chunk per fixture: 30 s of audio at a 10 s target.
+    audio = np.zeros(16000 * 30, dtype=np.float32)
+    job = ScriptJob(audio=audio, sample_rate=16000,
+                    recognizer=FixtureRecognizer(c.text for c in cases),
+                    translator=translator,
+                    config=ScriptConfig(chunk_s=10.0))
+    result = job.run()
+
+    # The bug this test exists for: every chunk failing on a language code.
+    assert result.failed_chunks == 0, (
+        f"chunks failed: {[s.error for s in result.segments if s.error]}")
+
+    script = result.script_text().lower()
+    for case in cases:
+        for needle in case.must_contain:
+            assert needle.lower() in script, (
+                f"{needle!r} missing for {case.text!r}; script was {script!r}")
+        for banned in case.must_not_contain:
+            assert banned.lower() not in script
+
+
+def test_script_mode_output_is_english_not_devanagari():
+    """AC-06.3 applies to the written script too: a presentation script with
+    Devanagari in it is useless for its stated purpose."""
+    import numpy as np
+
+    from vaani.ai.translate.nllb import NllbTranslator
+    from vaani.core.types import Transcript
+    from vaani.session.script_mode import ScriptConfig, ScriptJob
+
+    class R:
+        def transcribe(self, audio, sample_rate, **kw):
+            return Transcript(text="मैं कल मीटिंग में आऊंगा",
+                              language_distribution={"hi": 1.0}, confidence=0.9)
+
+    translator = NllbTranslator()
+    translator.warmup()
+    job = ScriptJob(audio=np.zeros(16000 * 12, dtype=np.float32),
+                    sample_rate=16000, recognizer=R(), translator=translator,
+                    config=ScriptConfig(chunk_s=10.0))
+    script = job.run().script_text()
+
+    assert script.strip()
+    # No Devanagari codepoints anywhere in the English script.
+    assert not any("ऀ" <= ch <= "ॿ" for ch in script), script

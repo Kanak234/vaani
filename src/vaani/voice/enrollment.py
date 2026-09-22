@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.errors import ErrorCode, Severity, VaaniError
+from ..system.platform import data_dir, is_windows
 from .consent import ConsentLedger
 
 #: Prompts chosen to cover a wide phonetic range plus the code-mixed register the
@@ -206,7 +207,10 @@ class VoiceProfileStore:
     def __init__(self, root: Path | None = None,
                  ledger: ConsentLedger | None = None) -> None:
         self.root = root or _default_root()
-        self.root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         self.ledger = ledger or ConsentLedger()
 
     def create(self, *, name: str, audio: np.ndarray, sample_rate: int,
@@ -235,7 +239,8 @@ class VoiceProfileStore:
         directory.mkdir(parents=True, exist_ok=True)
         audio_path = directory / "reference.wav"
         sf.write(str(audio_path), np.asarray(audio, dtype=np.float32), sample_rate)
-        os.chmod(audio_path, 0o600)     # the recording is personal data
+        if not is_windows():
+            os.chmod(audio_path, 0o600)     # the recording is personal data
 
         profile = VoiceProfile(
             id=profile_id, name=name, consent_id=consent.id,
@@ -299,5 +304,4 @@ class VoiceProfileStore:
 
 
 def _default_root() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "vaani" / "voice_profiles"
+    return data_dir() / "voice_profiles"

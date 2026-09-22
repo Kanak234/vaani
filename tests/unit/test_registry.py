@@ -115,3 +115,104 @@ def test_every_shipped_translation_provider_is_local():
     r = default_registry()
     assert all(not s.requires_network
                for s in r.available(ProviderKind.TRANSLATION))
+
+
+# ---------------------------------------------- start-up fallback (F-22)
+#
+# get_with_fallback() shipped with a docstring claiming "Used by: cli.py
+# meeting/run start-up" and no caller and no tests. These cover the behaviour
+# the meeting start-up path now depends on.
+
+class WarmupProvider:
+    """A provider that can fail at construction OR at warmup - the distinction
+    that matters here, because construction proves nothing."""
+
+    def __init__(self, *, fail_construct=False, fail_warmup=False, **kw):
+        if fail_construct:
+            raise ImportError("torch is not installed")
+        self._fail_warmup = fail_warmup
+        self.warmed = False
+
+    def warmup(self):
+        if self._fail_warmup:
+            raise RuntimeError("could not load the model")
+        self.warmed = True
+
+
+def warm_spec(key, *, priority, **flags):
+    return ProviderSpec(key, ProviderKind.TRANSLATION, key,
+                        requires_network=False,
+                        factory=lambda **kw: WarmupProvider(**flags, **kw),
+                        priority=priority)
+
+
+def test_fallback_returns_the_highest_priority_provider_that_works():
+    r = ProviderRegistry(local_only=True)
+    r.register(warm_spec("first", priority=10))
+    r.register(warm_spec("second", priority=20))
+    provider, failures = r.get_with_fallback(ProviderKind.TRANSLATION)
+    assert isinstance(provider, WarmupProvider)
+    assert failures == {}
+
+
+def test_fallback_skips_a_provider_that_cannot_be_constructed():
+    r = ProviderRegistry(local_only=True)
+    r.register(warm_spec("broken", priority=10, fail_construct=True))
+    r.register(warm_spec("working", priority=20))
+    provider, failures = r.get_with_fallback(ProviderKind.TRANSLATION)
+    assert provider.warmed is True
+    # The caller must be able to say what it fell back FROM; a silent
+    # downgrade looks like a bug.
+    assert "broken" in failures
+    assert "ImportError" in failures["broken"]
+
+
+def test_a_provider_must_actually_warm_up_to_count():
+    """Construction proves nothing: NllbTranslator constructs happily without
+    torch and only fails when warmed. Discovering that mid-meeting is exactly
+    the failure this prevents."""
+    r = ProviderRegistry(local_only=True)
+    r.register(warm_spec("constructs_but_dies", priority=10, fail_warmup=True))
+    r.register(warm_spec("working", priority=20))
+    provider, failures = r.get_with_fallback(ProviderKind.TRANSLATION)
+    assert provider.warmed is True
+    assert "constructs_but_dies" in failures
+
+
+def test_warmup_can_be_skipped_for_speed():
+    r = ProviderRegistry(local_only=True)
+    r.register(warm_spec("lazy", priority=10, fail_warmup=True))
+    provider, failures = r.get_with_fallback(ProviderKind.TRANSLATION, warmup=False)
+    assert provider.warmed is False     # never warmed, so never failed
+    assert failures == {}
+
+
+def test_every_provider_failing_raises_with_all_the_reasons():
+    r = ProviderRegistry(local_only=True)
+    r.register(warm_spec("a", priority=10, fail_construct=True))
+    r.register(warm_spec("b", priority=20, fail_warmup=True))
+    with pytest.raises(VaaniError) as excinfo:
+        r.get_with_fallback(ProviderKind.TRANSLATION)
+    assert excinfo.value.code is ErrorCode.PROVIDER_UNAVAILABLE
+    message = str(excinfo.value)
+    assert "a" in message and "b" in message
+
+
+def test_no_providers_at_all_names_local_only_as_the_cause():
+    """Otherwise "no usable provider" is baffling when the user set
+    local_only and every candidate was a cloud one."""
+    r = ProviderRegistry(local_only=True)
+    r.register(spec("cloud_only", network=True, priority=10))
+    with pytest.raises(VaaniError) as excinfo:
+        r.get_with_fallback(ProviderKind.TRANSLATION)
+    assert "local-only" in str(excinfo.value)
+
+
+def test_fallback_never_hands_out_a_network_provider_in_local_only_mode():
+    """The privacy guarantee must hold on the fallback path too, not only in
+    get()."""
+    r = ProviderRegistry(local_only=True)
+    r.register(spec("cloud", network=True, priority=10))
+    r.register(warm_spec("local", priority=20))
+    provider, _ = r.get_with_fallback(ProviderKind.TRANSLATION)
+    assert isinstance(provider, WarmupProvider)     # the local one

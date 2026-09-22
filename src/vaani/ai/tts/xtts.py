@@ -27,7 +27,6 @@ unhandled exception mid-meeting.
 from __future__ import annotations
 
 import os
-import time
 from pathlib import Path
 from collections.abc import Iterator
 from typing import Any
@@ -228,7 +227,7 @@ class XttsSynthesizer(VoiceSynthesizer):
         return profile, reference
 
     def _synthesize_full(self, text, profile, reference, speed):
-        started = time.perf_counter()
+        # NOTE: the "tts" stage is timed by core/pipeline._timed(); see nllb.py.
         try:
             wav = self._tts.tts(text=text, speaker_wav=str(reference),
                                 language=self.language, speed=speed)

@@ -110,6 +110,30 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                 return device, candidate
         return device, "float32"
 
+    def is_cached(self) -> bool:
+        """True when the model is already on disk, so warmup() will not download.
+
+        WHY THIS EXISTS: warmup() on a cold machine downloads up to ~1.5 GB
+        through huggingface_hub, whose progress output does not reach the
+        terminal in the way Vaani is launched. The caller needs to know
+        BEFORE blocking so it can tell the user what the silence is.
+
+        Asking the hub with local_files_only is the authoritative answer -
+        it applies the same resolution warmup() will, instead of this code
+        guessing at the cache directory layout and going stale when
+        huggingface_hub changes it.
+
+        Returns False on any error: the cost of being wrong is one extra
+        printed line, never a failure to start.
+        """
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(f"Systran/faster-whisper-{self.model_size}",
+                              local_files_only=True)
+            return True
+        except Exception:
+            return False
+
     def warmup(self) -> None:
         if self._model is not None:
             return

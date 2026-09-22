@@ -56,9 +56,11 @@ def test_model_chatter_is_stripped(raw, expected):
     assert _strip_model_chatter(raw) == expected
 
 
-def test_only_the_first_line_is_kept():
+def test_multiline_translation_is_preserved():
     raw = "I will call tomorrow.\n\nNote: 'kal' can mean yesterday too."
-    assert _strip_model_chatter(raw) == "I will call tomorrow."
+    result = _strip_model_chatter(raw)
+    assert "I will call tomorrow." in result
+    assert "Note:" in result  # full content preserved
 
 
 def test_empty_response_yields_empty():

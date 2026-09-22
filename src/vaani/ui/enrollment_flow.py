@@ -262,10 +262,16 @@ class EnrollmentDialog(tk.Toplevel):
             self._polling = False
 
     def _record(self) -> None:
-        from ..audio.backend.pulse_backend import PulseCaptureStream
+        import os
         try:
-            stream = PulseCaptureStream(device=self.input_device, sample_rate=16000,
-                                        frame_ms=20, stream_name="enroll-gui")
+            if os.name == 'nt':
+                from ..audio.backend.windows_backend import WindowsCaptureStream
+                stream = WindowsCaptureStream(device=self.input_device, sample_rate=16000,
+                                              frame_ms=20, stream_name="enroll-gui")
+            else:
+                from ..audio.backend.pulse_backend import PulseCaptureStream
+                stream = PulseCaptureStream(device=self.input_device, sample_rate=16000,
+                                            frame_ms=20, stream_name="enroll-gui")
         except Exception as exc:
             self._error = f"Microphone unavailable: {exc}"
             return

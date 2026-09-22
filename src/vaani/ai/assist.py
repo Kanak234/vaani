@@ -120,8 +120,16 @@ class AssistDraft:
 class AnswerAssistant:
     """Drafts phrasings with the local LLM. Never speaks on its own."""
 
-    def __init__(self, *, translator=None, model: str = "qwen3-coder:latest",
+    def __init__(self, *, translator=None, model: str | None = None,
                  max_context_turns: int = 6) -> None:
+        # model=None means auto-detect, the same contract as OllamaTranslator.
+        # It used to default to "qwen3-coder:latest", which was wrong twice
+        # over: that model is not installed on either target machine, and
+        # coder builds are the ones measured getting dates wrong (see
+        # ai/model_detect.PREFERRED_MODELS). Every real caller passes an
+        # explicit translator, so this was latent -- but a latent default that
+        # names a missing model is a crash waiting for the first caller who
+        # relies on it.
         # Reuses OllamaTranslator's transport: same loopback host, same
         # local-only guarantee, no second HTTP client to maintain.
         if translator is None:
@@ -153,7 +161,7 @@ class AnswerAssistant:
         parts += [f"The speaker said: {source_text}",
                   "Suggested English phrasing:"]
 
-        raw = self._llm._generate("\n".join(parts), [], "hi", "en")
+        raw = self._llm.generate_raw("\n".join(parts))
         from .translate.ollama import _strip_model_chatter
         text = _strip_model_chatter(raw)
         if not text:

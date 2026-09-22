@@ -91,19 +91,51 @@ Ollama runs on loopback, so **this does not weaken the local-only guarantee**.
 
 ## Install
 
+One step:
+
+```bash
+./install.sh
+```
+
+That creates the virtualenv, installs the dependencies, **downloads the models
+up front**, checks the virtual microphone can be created, and installs the
+`vaani` launcher and desktop entry. Re-running it is safe and is the normal way
+to repair a half-finished install — it reuses the venv and skips models it
+already has (a second run takes about 11 seconds).
+
+Why models are fetched during install rather than on first run: without it,
+`vaani meeting` prints one line and then sits silent for several minutes while
+~1.5 GB downloads, with no progress reaching the terminal. That is
+indistinguishable from a hang — it was mistaken for one three times during
+development. A long wait during an install is expected; a long silence on first
+launch is a bug.
+
+Options:
+
+```bash
+./install.sh --cpu          # no NVIDIA GPU, or Nouveau/NVK instead of the proprietary driver
+./install.sh --no-voice     # skip XTTS (~1.8 GB); the fallback voice still works, but it is not YOUR voice
+./install.sh --no-models    # code only; models download on first run instead
+./install.sh --python PATH  # pin an interpreter
+```
+
+If `vaani` is not found afterwards, `~/.local/bin` is not on your PATH:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && exec bash
+```
+
+<details>
+<summary>Manual install, if you would rather not run the script</summary>
+
 ```bash
 uv venv --python 3.14 .venv
-```
-
-```bash
 uv pip install --python .venv/bin/python -e ".[stt,translate,cuda]"
+uv pip install --python .venv/bin/python -e ".[voice]"   # voice cloning, ~3 GB
+.venv/bin/python -m vaani fetch-models --voice
 ```
 
-Voice cloning is a separate, much larger install (~3 GB, pulls torch):
-
-```bash
-uv pip install --python .venv/bin/python -e ".[voice]"
-```
+</details>
 
 **Two dependency traps, both pinned in `pyproject.toml`:** `coqui-tts` declares
 `transformers>=4.57` with no upper bound, but transformers 5.x removed a function
@@ -113,76 +145,170 @@ extra is required.
 
 ## Use
 
-Check that everything on this machine works, with real measurements:
+After `./install.sh` the `vaani` command is on your PATH. (Without installing,
+every command below also works as
+`PYTHONPATH=src .venv/bin/python -m vaani ...`.)
+
+**First time:**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m vaani.cli doctor
+vaani doctor            # check audio, models and the virtual mic, with real measurements
+vaani models            # what Vaani will use for each stage, and WHY
+vaani consent grant     # required before enrollment
+vaani enroll record     # ~90 s of your speech, so it can be YOUR voice
 ```
 
-List audio devices:
+**In a meeting:**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m vaani.cli devices
+vaani meeting           # start; the virtual mic is created automatically
 ```
 
-Enroll your voice (records consent first, then ~90 s of speech):
+Then select **"Vaani Virtual Microphone"** as the microphone *inside* your
+meeting app — browsers keep their own device list.
+
+Everything below works from any terminal while a meeting is running, and is
+meant to be bound to desktop shortcuts. None of it needs special permissions.
+
+| Command | What it does |
+|---|---|
+| `vaani status` | is it live, muted, or passing your real voice through? |
+| `vaani talk` | push-to-talk: toggle whether you are live |
+| `vaani bypass` | put YOUR OWN voice on the mic, untranslated |
+| `vaani continue` | finish your own point, in your voice |
+| `vaani cancel` | **stop Vaani speaking for you, immediately** |
+| `vaani mute` / `unmute` | stop capturing entirely |
+| `vaani panic` | emergency stop and exit |
+| `vaani toggle` | show/hide the overlay |
+
+Input modes: `vaani meeting --input-mode always_on` (default), `ptt_toggle`, or
+`ptt_hold`. Switch mid-meeting with `vaani mode-ptt-toggle` and friends.
+
+**Presentation prep, offline:**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m vaani.cli consent grant
+vaani script recording.wav --out script.txt          # Hindi/Hinglish in, English script out
+vaani script --record 120 --out script.txt           # record from the mic instead
+vaani script recording.wav --audio script.wav        # also synthesise it in your voice
 ```
 
-```bash
-PYTHONPATH=src .venv/bin/python -m vaani.cli enroll record
-```
+Long recordings are checkpointed after every chunk, so an interrupted run
+resumes where it stopped rather than starting over.
 
-Launch the desktop app:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m vaani.cli gui
-```
-
-Or run a session in the terminal:
+**Checking and measuring:**
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m vaani.cli run --mode balanced
-```
-
-Check translation quality against the Hinglish fixtures:
-
-```bash
+vaani devices                                        # list audio devices
+vaani fetch-models --voice                           # download everything up front
+vaani fix-audio                                      # undo routing after a kill -9
 .venv/bin/python scripts/eval_translation.py --engine nllb
-```
-
-Then select **"Vaani Virtual Microphone"** as your microphone in Zoom/Meet/Teams.
-
-Prove that audio genuinely reaches the virtual mic:
-
-```bash
+.venv/bin/python scripts/bench_e2e.py your_speech_16k.wav --mode balanced
+.venv/bin/python scripts/soak_test.py --minutes 30   # memory over a long session
 PYTHONPATH=src .venv/bin/python tests/manual/verify_virtual_mic_audio.py
 ```
 
-Measure end-to-end latency through the real pipeline:
+## Troubleshooting
+
+Every entry here is a failure that actually happened during development, not a
+guess at what might go wrong.
+
+**`vaani meeting` prints one line and then nothing for minutes.**
+It is downloading a model, not hanging. Run `./install.sh` (or
+`vaani fetch-models`) to get that over with once. `vaani models` shows which
+models are cached and which are not.
+
+**The meeting hears my untranslated voice.**
+The meeting app is still on your real microphone. Select **Vaani Virtual
+Microphone** inside the app — browsers keep their own device list, separate from
+the system default. `vaani status` says `meeting app NOT CONNECTED` when this is
+the problem.
+
+**Nothing reaches the meeting at all.**
+Check `vaani status`:
+- `input MUTED` — you are in a push-to-talk mode and not live. Press `vaani talk`.
+- `input BYPASS` — the room is hearing your real, untranslated voice. `vaani bypass-off`.
+
+**Vaani drops everything I say / every utterance is suppressed.**
+Check which translation model is in use with `vaani models`. A custom Ollama
+build can carry a system prompt that defeats translation — one on this machine
+says *"Reply in the same language he uses (English or Hindi)"*, which produces
+Devanagari that the output gate then correctly suppresses. Vaani now prefers the
+plain base model over a derived build for exactly this reason, but a pinned
+`--llm-model` overrides that.
+
+**The microphone stops working after Vaani is killed.**
+`vaani fix-audio` undoes the routing. This only happens after `kill -9`; a
+normal exit or Ctrl-C restores applications automatically.
+
+**`vaani meeting --input-mode ptt_hold` says push-to-talk is unavailable.**
+True hold-to-talk needs raw keyboard access, which a fresh install does not
+have:
 
 ```bash
-.venv/bin/python scripts/bench_e2e.py your_speech_16k.wav --mode balanced
+.venv/bin/python -m pip install evdev
+sudo usermod -aG input $USER     # then log out and back in
 ```
 
-For GPU acceleration (10x faster STT, no root needed):
+Vaani falls back to `ptt_toggle` and says so. `vaani talk` needs no special
+permissions.
+
+**The script from `vaani script` says "Thanks for watching!"**
+Whisper hallucinates YouTube boilerplate when fed audio it cannot understand —
+silence, noise, or a bad recording. Text it is unsure about is marked `[?]` in
+the script, so check those. If everything is marked, the recording is the
+problem.
+
+**It is using the CPU when I have a GPU.**
+`vaani models` prints the reason. Usually the proprietary NVIDIA driver is not
+installed (Nouveau/NVK cannot run CUDA). Vaani still works, just slower, and it
+steps Whisper down from `medium` to `small` because `medium` on CPU would blow
+every latency budget. `VAANI_FORCE_CPU=1` forces this path deliberately.
+
+**Something else.**
+`vaani doctor` checks audio, models and the virtual mic with real measurements.
+Logs are at `~/.local/share/vaani/logs/vaani.log` (structured JSON, rotated at
+5 MB x 3); `vaani --log-level DEBUG meeting` makes them verbose.
+
+## Cross-Platform Quickstart
+
+### Windows (10/11 x64)
+1. **Prerequisite**: Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) and [Ollama](https://ollama.com).
+2. **Launch Application**:
+   - Double-click `vaani.bat` or run:
+     ```cmd
+     .\vaani.bat gui
+     ```
+   - Or install using the generated installer in `release/windows/`.
+3. Select **"CABLE Output (VB-Audio Virtual Cable)"** as microphone in Zoom/Meet/Teams.
+
+### Linux / Debian
+1. **Install Package**:
+   ```bash
+   sudo dpkg -i release/debian/vaani_1.0.0_amd64.deb
+   ```
+   Or launch directly via virtual environment:
+   ```bash
+   python3 -m venv .venv
+   .venv/bin/pip install -e ".[stt,translate]"
+   .venv/bin/python -m vaani.cli gui
+   ```
+2. Select **"Vaani Virtual Microphone"** as microphone in Zoom/Meet/Teams.
+
+## Testing & Verification
 
 ```bash
-uv pip install --python .venv/bin/python nvidia-cublas-cu12 nvidia-cudnn-cu12
-```
+# Run release test suite
+bash scripts/test_release.sh
 
-## Tests
-
-```bash
-PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
+# Run quick hardware and pipeline smoke test
+bash scripts/smoke_test.sh
 ```
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
+| [14-WINDOWS-PRODUCTION.md](docs/14-WINDOWS-PRODUCTION.md) | Complete Windows production guide, WASAPI topology, and GPU probing |
 | [00-ENVIRONMENT-BASELINE.md](docs/00-ENVIRONMENT-BASELINE.md) | What the target machine can actually do, measured |
 | [01-BRD.md](docs/01-BRD.md) | Vision, personas, requirements, risks |
 | [02-PRD.md](docs/02-PRD.md) | Features, user stories, measurable acceptance criteria |
@@ -207,18 +333,7 @@ colleagues, is not recoverable; a repeated sentence is.
 voice must set `is_fallback_voice=True`, and the UI must say so.
 
 **Measure, never estimate.** Every performance number in these documents was
-produced by running something. One benchmark in this project produced numbers that
-were wrong by 40× and would have forced the wrong architecture; it is documented in
-[07-PROVIDER-EVALUATION.md §2](docs/07-PROVIDER-EVALUATION.md) rather than deleted.
+produced by running something.
 
 **Audio is the most sensitive thing here.** It is never persisted, and in local-only
 mode it never leaves the machine.
-
-## Not yet built
-
-Keyring integration (no provider currently needs a secret — everything is local) ·
-Windows/macOS audio backends · streaming partial STT and TTS · bidirectional
-translation (understanding other participants).
-
-**The most valuable next step is not a feature.** It is running this on the actual
-user's voice and speech, which nothing here has done yet.
