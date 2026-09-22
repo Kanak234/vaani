@@ -43,10 +43,12 @@ from ..core.gate import ConfidenceGate, GateConfig
 from ..core.latency_monitor import LatencyMonitor
 from ..core.pipeline import PipelineConfig, TranslationPipeline
 from ..core.state_machine import SessionState, SessionStateMachine
-from ..core.supervisor import StageSupervisor
+from ..core.supervisor import CrashWindow, StageSupervisor
 from .input_mode import InputMode, InputModeController
 from ..system.logging import get_logger
-from ..core.types import PerformanceMode, Utterance, UtteranceResult
+from ..core.types import (
+    PerformanceMode, SuppressionReason, Utterance, UtteranceResult,
+)
 
 SAMPLE_RATE = 16000
 FRAME_MS = 20
@@ -101,7 +103,8 @@ class TranslationSession:
                  config: SessionConfig | None = None,
                  on_result: Callable[[UtteranceResult], None] | None = None,
                  on_state: Callable[[SessionState, SessionState], None] | None = None,
-                 on_latency_warning: Callable[[object], None] | None = None) -> None:
+                 on_latency_warning: Callable[[object], None] | None = None,
+                 on_stage_degraded: Callable[[str], None] | None = None) -> None:
         self.config = config or SessionConfig()
         self.id = uuid.uuid4().hex
         self.sm = SessionStateMachine()
@@ -170,6 +173,17 @@ class TranslationSession:
         # Contains a crash in the worker loop so one bad utterance cannot end
         # the session. WHERE IT GOES NEXT: on_stage_failure/on_degraded are
         # surfaced by cli.py to the overlay banner.
+        # Per-stage failure windows for MID-SESSION fallback.
+        # WHY these are separate from `supervisor`: the supervisor catches
+        # EXCEPTIONS out of the worker, but TranslationPipeline.process()
+        # already catches stage exceptions internally and returns a suppressed
+        # result instead. So a translation engine that fails every utterance
+        # never raises, never trips the supervisor, and the meeting degrades
+        # into silence with nothing swapping the broken provider out.
+        # These windows watch SUPPRESSED RESULTS instead, which is the signal
+        # that actually exists on that path.
+        self._stage_windows: dict[str, CrashWindow] = {}
+        self._on_stage_degraded = on_stage_degraded
         self.supervisor = StageSupervisor(
             "pipeline",
             limit=self.config.stage_crash_limit,
@@ -534,6 +548,8 @@ class TranslationSession:
         if result.suppressed:
             self.total_suppressed += 1
 
+        self._note_stage_outcome(result)
+
         if self._db is not None and self._db_session_id is not None:
             try:
                 self._db.record_utterance(self._db_session_id, result)
@@ -593,6 +609,82 @@ class TranslationSession:
                 f"{self.config.stage_crash_window_s:.0f}s - degraded mode")
         except Exception:
             pass
+
+    def failing_stage(self, result: UtteranceResult) -> str | None:
+        """Which stage failed, for a result suppressed by a stage failure.
+
+        Read off the LAST recorded timing: pipeline._timed() records a stage's
+        duration on the failure path as well as the success path, so the final
+        entry is the stage that was running when it broke. Returns None for any
+        other kind of suppression - a low-confidence transcript is the gate
+        working correctly, not a broken provider, and must never cause a swap.
+        """
+        if not result.suppressed:
+            return None
+        if result.suppression_reason is not SuppressionReason.STAGE_FAILURE:
+            return None
+        if not result.timings:
+            return None
+        return result.timings[-1].stage
+
+    def _note_stage_outcome(self, result: UtteranceResult) -> None:
+        """Track per-stage failures and announce a stage that is now broken.
+
+        WHERE IT GOES NEXT: on_stage_degraded(stage) is handled by cli.py,
+        which swaps the provider for that stage and shows an overlay toast.
+        This method decides WHEN; it deliberately does not decide WHAT to swap
+        to, because the session has no business knowing the provider ladder.
+        """
+        stage = self.failing_stage(result)
+        if stage is None:
+            # A good utterance clears every window: whatever was wobbling is
+            # demonstrably working now, so old failures must not accumulate
+            # across a long meeting and trip on an unrelated later hiccup.
+            if not result.suppressed:
+                for window in self._stage_windows.values():
+                    window.record_success()
+            return
+
+        window = self._stage_windows.get(stage)
+        if window is None:
+            window = CrashWindow(limit=self.config.stage_crash_limit,
+                                 window_s=self.config.stage_crash_window_s)
+            self._stage_windows[stage] = window
+
+        if not window.record_failure():
+            return
+
+        _log.error("stage %s failed %d times in %.0fs - requesting fallback",
+                   stage, self.config.stage_crash_limit,
+                   self.config.stage_crash_window_s)
+        # Reset immediately so the REPLACEMENT provider gets its own full
+        # allowance rather than inheriting the dead one's failures and being
+        # swapped out on its first stumble.
+        window.record_success()
+        if self._on_stage_degraded is not None:
+            try:
+                self._on_stage_degraded(stage)
+            except Exception:
+                # A failing swap must not take the meeting with it; the stage
+                # keeps failing and the user keeps seeing suppressions, which
+                # is strictly better than a dead session.
+                _log.exception("fallback handler for stage %s raised", stage)
+
+    def swap_translator(self, translator, *, reason: str) -> None:
+        """Replace the translation engine mid-session.
+
+        Safe to call from the control thread while the worker is running: the
+        pipeline reads `self.translator` per utterance, and a single attribute
+        assignment is atomic in CPython, so the worst case is one utterance
+        translated by the outgoing engine.
+        """
+        self.pipeline.translator = translator
+        _log.warning("translation engine swapped: %s", reason)
+        if self._on_latency_warning is not None:
+            try:
+                self._on_latency_warning(f"translation fallback: {reason}")
+            except Exception:
+                pass
 
     def new_results_since(self, seq: int) -> tuple[list[UtteranceResult], int]:
         """Results finished since sequence ``seq``, plus the new sequence.

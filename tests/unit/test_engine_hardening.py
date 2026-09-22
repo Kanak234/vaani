@@ -295,3 +295,188 @@ def test_bound_is_respected_at_several_sizes(n):
     for _ in range(n * 3):
         s._put_audio(block)
     assert s._out_queue.qsize() <= n
+
+
+# ----------------------------------------- mid-session provider fallback
+#
+# THE acceptance criterion these cover: "model auto-detection and mid-session
+# fallback work". The subtlety is that a broken translation engine never
+# RAISES - the pipeline catches stage exceptions and returns a suppressed
+# result - so the supervisor never sees it. Without these windows the meeting
+# degrades into silence with nothing swapping the dead provider out.
+
+from vaani.core.types import StageTiming, SuppressionReason  # noqa: E402
+
+
+def suppressed_result(stage: str, *, reason=SuppressionReason.STAGE_FAILURE):
+    """A result shaped like one the pipeline produces when `stage` fails."""
+    from vaani.core.types import UtteranceResult
+    r = UtteranceResult(utterance=utt())
+    r.suppressed = True
+    r.suppression_reason = reason
+    r.timings = [StageTiming(stage="stt", duration_ms=10.0),
+                 StageTiming(stage=stage, duration_ms=20.0)]
+    return r
+
+
+def test_the_failing_stage_is_read_off_the_last_timing():
+    s = make_session()
+    assert s.failing_stage(suppressed_result("translate")) == "translate"
+    assert s.failing_stage(suppressed_result("tts")) == "tts"
+
+
+def test_a_low_confidence_suppression_is_not_a_stage_failure():
+    """The gate working correctly must never swap a provider out."""
+    s = make_session()
+    result = suppressed_result("translate",
+                               reason=SuppressionReason.LOW_STT_CONFIDENCE)
+    assert s.failing_stage(result) is None
+
+
+def test_a_good_result_has_no_failing_stage():
+    s = make_session()
+    from vaani.core.types import UtteranceResult
+    assert s.failing_stage(UtteranceResult(utterance=utt())) is None
+
+
+def test_repeated_translate_failures_request_a_fallback():
+    degraded: list[str] = []
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=3),
+        on_stage_degraded=degraded.append)
+
+    for _ in range(3):
+        s._note_stage_outcome(suppressed_result("translate"))
+
+    assert degraded == ["translate"]
+
+
+def test_a_good_utterance_clears_the_window():
+    """Scattered failures over a long meeting must not accumulate into a
+    spurious swap."""
+    from vaani.core.types import UtteranceResult
+    degraded: list[str] = []
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=3),
+        on_stage_degraded=degraded.append)
+
+    s._note_stage_outcome(suppressed_result("translate"))
+    s._note_stage_outcome(suppressed_result("translate"))
+    s._note_stage_outcome(UtteranceResult(utterance=utt()))   # a good one
+    s._note_stage_outcome(suppressed_result("translate"))
+    s._note_stage_outcome(suppressed_result("translate"))
+
+    assert degraded == []
+
+
+def test_stages_are_tracked_independently():
+    """One flaky stage must not get another stage swapped out."""
+    degraded: list[str] = []
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=3),
+        on_stage_degraded=degraded.append)
+
+    for stage in ("translate", "tts", "translate", "tts"):
+        s._note_stage_outcome(suppressed_result(stage))
+
+    assert degraded == []       # neither reached 3
+
+
+def test_the_replacement_provider_gets_a_clean_allowance():
+    """Otherwise the new engine inherits the dead one's failures and is
+    swapped out on its first stumble."""
+    degraded: list[str] = []
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=3),
+        on_stage_degraded=degraded.append)
+
+    for _ in range(3):
+        s._note_stage_outcome(suppressed_result("translate"))
+    assert degraded == ["translate"]
+
+    # Two more failures must NOT immediately re-trigger.
+    s._note_stage_outcome(suppressed_result("translate"))
+    s._note_stage_outcome(suppressed_result("translate"))
+    assert degraded == ["translate"]
+
+    s._note_stage_outcome(suppressed_result("translate"))
+    assert degraded == ["translate", "translate"]
+
+
+def test_a_raising_fallback_handler_does_not_kill_the_session():
+    def boom(_stage):
+        raise RuntimeError("swap failed")
+
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=1),
+        on_stage_degraded=boom)
+    s._note_stage_outcome(suppressed_result("translate"))       # must not raise
+
+
+def test_swapping_the_translator_takes_effect_and_is_announced():
+    warnings: list[str] = []
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False),
+        on_latency_warning=lambda w: warnings.append(str(w)))
+
+    class Replacement:
+        key = "replacement"
+
+        def translate(self, text, *, source_language, target_language, context=None):
+            from vaani.core.types import Translation
+            return Translation(text="replaced", source_language=source_language,
+                               target_language=target_language, confidence=0.9)
+
+    s.swap_translator(Replacement(), reason="LLM failed 3x")
+    assert s.pipeline.translator.key == "replacement"
+    # A silent downgrade looks like a bug, so the user is told.
+    assert any("translation fallback" in w for w in warnings)
+    # And the new engine is actually used.
+    s._process_one(utt(seq=7))
+    assert s.results[-1].translation.text == "replaced"
+
+
+def test_degrading_a_router_keeps_nllb_not_the_failed_llm():
+    """REGRESSION. RoutingTranslator is built as
+    RoutingTranslator(fast=nllb, accurate=llm), so the SURVIVING engine is
+    `fast`. The first version of the degrade ladder reached for `accurate` and
+    would have handed the session the very LLM that had just failed three
+    times."""
+    from vaani.ai.translate.router import RoutingTranslator
+
+    class Nllb:
+        key = "nllb"
+        requires_network = False
+
+        def translate(self, text, *, source_language, target_language, context=None):
+            from vaani.core.types import Translation
+            return Translation(text="nllb", source_language=source_language,
+                               target_language=target_language, confidence=0.9)
+
+    class Llm:
+        key = "llm"
+        requires_network = False
+
+        def translate(self, *a, **k):
+            raise RuntimeError("the broken one")
+
+    router = RoutingTranslator(fast=Nllb(), accurate=Llm())
+    s = make_session()
+    s.pipeline.translator = router
+
+    surviving = router.fast
+    s.swap_translator(surviving, reason="LLM failed repeatedly")
+
+    assert s.pipeline.translator.key == "nllb"

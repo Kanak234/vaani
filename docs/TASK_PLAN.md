@@ -141,14 +141,54 @@ Could NOT verify here:
       encouraging but is NOT the same as a real Meet call being understood.
 
 ## Phase 3 — Auto model detection
-- [ ] CUDA "really works" probe + VAANI_FORCE_CPU
-- [~] Ranking + reasons landed as `ai/model_detect.py` (rank_models / probe_model /
-      resolve_llm_model), not `system/model_select.py`. `bench_cache.py` still missing.
-- [~] Remove hardcoded model defaults → "auto" (cli.py done via ai/model_detect.py;
-      `ai/assist.py:123` STILL hardcodes qwen3-coder:latest - not installed here)
-- [~] `ai/registry.get_with_fallback()` landed; per-stage supervisor wiring + overlay toast pending
-- [ ] `vaani models` command (shows choices + reasons)
-- [~] verify_phase3.sh (GPU run + FORCE_CPU run) on the laptop
+- [x] CUDA "really works" probe (already existed: verifies by real inference,
+      not by device count) + **VAANI_FORCE_CPU added**. The CPU-fallback branch
+      was unverifiable on this laptop because CUDA works; the env override makes
+      it reachable. Verified it cascades: forcing CPU steps Whisper medium→small.
+- [x] Ranking + reasons in `ai/model_detect.py`. **35 tests added** — it shipped
+      with none, despite deciding which LLM translates the user's speech.
+      `bench_cache.py` still missing (ranking is static + evidence-led, so a
+      benchmark cache has not been needed yet).
+- [x] Hardcoded model defaults removed. `ai/assist.py` defaulted to
+      `qwen3-coder:latest` (not installed on either machine, and a coder build —
+      the category measured getting dates wrong); `OllamaTranslator` defaulted to
+      `phi4-mini:latest`. Both now None = auto-detect.
+- [x] **REAL BUG found by `vaani models`:** auto-detection picked
+      `rishi-phi4-mini-latest` over `phi4-mini`. `ollama show --system` reveals
+      that custom build carries "Reply in the same language he uses (English or
+      Hindi)" and temperature 0.6. Vaani must ALWAYS emit English (AC-06.3), so
+      it would produce Devanagari, the gate would suppress it, and the user would
+      watch utterances vanish. Fixed with an `is_derived()` tie-break: same rank,
+      base model first. (The first attempt at is_derived was itself wrong —
+      `phi4-mini` matched the separate entry `phi4` and flagged itself derived —
+      pinned by a regression test.)
+- [x] **Mid-session fallback implemented** (the acceptance criterion). The
+      subtlety: a broken translation engine never RAISES — pipeline.process()
+      catches stage exceptions and returns a suppressed result — so the
+      supervisor never saw it and the meeting would degrade into silence with
+      nothing swapping the dead provider out. Per-stage CrashWindows now watch
+      SUPPRESSED RESULTS, and `session.swap_translator()` performs the swap.
+      Ladder: routing (NLLB+LLM) → NLLB alone. No further rung on purpose —
+      passthrough would put untranslated Hindi into an English meeting.
+      **Verified live:** RoutingTranslator → Nllb after 3 translate failures.
+      (Regression test pins the direction: the router is built
+      `RoutingTranslator(fast=nllb, accurate=llm)`, and the first version of the
+      ladder reached for `accurate` — i.e. degraded TO the engine that had just
+      failed three times.)
+- [x] `ai/registry.get_with_fallback()` now has 7 tests. Its docstring claimed
+      "Used by: cli.py meeting/run start-up" but **nothing called it** —
+      `_build_translator` solves start-up degradation differently and better
+      (it composes a router rather than picking one provider). Left in place and
+      tested rather than deleted; the false docstring claim is the thing to fix
+      if it stays unused.
+- [x] `vaani models`: GPU status, Whisper model per performance mode with
+      download state, ranked Ollama list with DISCOURAGED flags, and the chosen
+      model with its reasoning. Auto-detection is only trustworthy if its
+      reasoning is inspectable — and this command is what exposed the derived-
+      model bug above within a minute of existing.
+- [~] verify_phase3.sh (GPU run + FORCE_CPU run) on the laptop. NOTE: a real
+      FORCE_CPU meeting run will first download Whisper `small` (~460 MB), which
+      is not yet cached here.
 
 ## Phase 4 — Takeover
 - [ ] `session/continuation.py` (Takeover A) + tests
@@ -224,3 +264,9 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
 - 2026-09-22 Phase 2 COMPLETE. evdev hold-to-talk implemented and tested against
   fake events; its degradation path verified live because the real path needs a
   privileged group change. Suite 434 green, ruff clean.
+- 2026-09-23 Phase 3 essentially complete. Found and fixed a real model-selection
+  bug (custom Modelfile telling the LLM to reply in Hindi), removed the last two
+  hardcoded model defaults, implemented mid-session fallback, and added
+  VAANI_FORCE_CPU so the CPU branch is testable at all. Suite 486 green, ruff
+  clean. Remaining in Phase 3: bench_cache.py (may not be needed) and
+  verify_phase3.sh.

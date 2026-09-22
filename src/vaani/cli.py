@@ -867,6 +867,44 @@ def cmd_meeting(args) -> int:
         return 2
     print(f"  translation: {translation_note}")
 
+    def _degrade_stage(stage: str) -> None:
+        """MID-SESSION fallback: this stage has failed repeatedly, swap it.
+
+        Called from the worker thread by TranslationSession when a stage's
+        failure window trips. The session decides WHEN; the ladder lives here,
+        because the session has no business knowing the provider order.
+
+        Translation degrades down the same ladder _build_translator climbs:
+        routing (NLLB + LLM) -> NLLB alone. WHY that direction: the LLM half is
+        the part that needs Ollama up, a model resident and VRAM free, so it is
+        overwhelmingly the half that breaks mid-meeting. NLLB alone still
+        handles Devanagari and English correctly; romanised Hinglish then comes
+        back untranslated and the gate suppresses it, so the user gets silence
+        and a reason rather than wrong speech (ADR-003).
+
+        There is deliberately NO further rung. Dropping to passthrough would
+        put untranslated Hindi into an English meeting, which is worse than
+        saying nothing.
+        """
+        if stage != "translate":
+            # STT and TTS have no second engine configured in this build; the
+            # overlay warning has already told the user. Saying so honestly
+            # beats pretending a fallback happened.
+            return
+        current = session.pipeline.translator
+        # NOTE THE NAMES: RoutingTranslator is built as
+        # RoutingTranslator(fast=nllb, accurate=llm), so `fast` is NLLB and
+        # `accurate` is the LLM. Degrading means keeping `fast`. Reaching for
+        # `accurate` here would hand the session the very engine that just
+        # failed three times - which is what the first version of this did.
+        nllb = getattr(current, "fast", None)
+        llm = getattr(current, "accurate", None)
+        if nllb is None or llm is None:
+            return              # already a single engine; nothing to drop to
+        session.swap_translator(
+            nllb, reason="LLM failed repeatedly; NLLB only "
+                         "(romanised Hinglish will now be suppressed)")
+
     synthesizer, voice_profile_id, voice_note = FallbackSynthesizer(), None, "fallback"
     if args.voice != "fallback":
         try:
@@ -887,6 +925,7 @@ def cmd_meeting(args) -> int:
     session = TranslationSession(
         recognizer=recognizer, translator=translator, synthesizer=synthesizer,
         vad=EnergyVad(),
+        on_stage_degraded=lambda stage: _degrade_stage(stage),
         config=SessionConfig(input_device=args.input,
                              performance_mode=PerformanceMode(args.mode),
                              # Chosen at startup, changeable mid-meeting with
