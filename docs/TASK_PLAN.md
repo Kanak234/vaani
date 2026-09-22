@@ -268,12 +268,37 @@ Could NOT verify here:
       entirely unverified.
 
 ## Phase 6 — UI + packaging
-- [ ] Root `install.sh` (TRD §6), idempotent
+- [x] Root `install.sh`, idempotent. **VERIFIED by actually doing it:** cloned
+      the repo to a clean directory with no venv, ran `./install.sh --no-voice`,
+      and `vaani models` worked from the fresh install with no manual steps —
+      acceptance criterion A1 met. Re-running took **11 s** (reused the venv,
+      skipped both already-downloaded models, exit 0).
+      It calls `packaging/install.sh` rather than replacing it: that script does
+      the narrower desktop-integration job and refuses to run without a venv,
+      which is correct for what it is.
+      NOTE: running install.sh from a second checkout repoints
+      `~/.local/bin/vaani` at that checkout. Correct behaviour, but it caught me
+      out during testing and had to be restored by hand.
+- [x] `vaani fetch-models` — downloads Whisper (all sizes the modes use), NLLB
+      and optionally XTTS up front. This is the real fix for the silent
+      first-run problem found in Phase 2; the notice added then was a mitigation.
+      Idempotent and resumable.
 - [ ] Dashboard input-mode switch, model status, Script screen
-- [ ] Config defaults + README (setup + troubleshooting)
+- [x] README rewritten for setup + troubleshooting. Every troubleshooting entry
+      is a failure that ACTUALLY happened during development, not a guess:
+      the silent model download, the meeting app staying on the real mic, MUTED
+      vs BYPASS, the custom Ollama model whose system prompt defeats translation,
+      `fix-audio` after a kill -9, the evdev/input-group requirement, Whisper's
+      "Thanks for watching!" hallucination, and CPU fallback.
+      The Use section previously told users to type
+      `PYTHONPATH=src .venv/bin/python -m vaani.cli ...`, which is stale once
+      install.sh puts `vaani` on PATH. Rewritten, and **all 19 documented
+      commands were verified to exist** by invoking each one.
 - [ ] Comment pass: every file touched in v1 has rule-4 comments; remaining files
       listed in the "comment backlog" below and done file by file
-- [~] verify_phase6.sh fresh-clone install on the laptop
+- [x] Fresh-clone install verified on the laptop (see above). A dedicated
+      verify_phase6.sh is still not written; the manual run is recorded here
+      with its results instead.
 
 ## Phase 7 — Final verification
 - [ ] Full suite + lint
@@ -352,3 +377,9 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
   (rejected by real NLLB, every chunk failed) and a chunker that produced 147
   chunks from 13 s of audio because the quiet-point search could reach back to
   start+20 ms. Both fixed with regression tests. Suite 578 green, ruff clean.
+- 2026-09-23 Phase 6 packaging done. Root install.sh written and verified by a
+  real fresh-clone install (works, and idempotent at 11 s). README install and
+  troubleshooting rewritten from actual observed failures; all 19 documented
+  commands verified to exist. Suite 578 green, ruff clean.
+  Outstanding in Phase 6: the GUI dashboard work (input-mode switch, model
+  status, Script screen) and the rule-4 comment backlog.

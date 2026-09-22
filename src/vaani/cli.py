@@ -225,6 +225,70 @@ def cmd_script(args) -> int:
     return 0
 
 
+def cmd_fetch_models(args) -> int:
+    """Download every model Vaani needs, up front.
+
+    WHY THIS EXISTS: without it the first `vaani meeting` prints one line and
+    then sits silent for minutes while huggingface_hub pulls ~1.5 GB, with no
+    progress reaching the terminal. That was mistaken for a hang during Phase 2
+    testing - three times - which is exactly what a first-time user would
+    conclude before killing it. install.sh calls this so the wait happens once,
+    during an install, where a wait is expected.
+
+    Idempotent: anything already cached is skipped, so it is safe to re-run and
+    safe to interrupt and resume.
+    """
+    ok = True
+
+    print("Fetching models. Already-downloaded ones are skipped.\n")
+
+    # --- speech recognition -------------------------------------------------
+    from .ai.stt.whisper import FasterWhisperRecognizer
+    wanted = sorted({FasterWhisperRecognizer.for_mode(m).model_size
+                     for m in PerformanceMode})
+    for size in wanted:
+        recognizer = FasterWhisperRecognizer(model_size=size)
+        if recognizer.is_cached():
+            print(f"  whisper {size:<8} already downloaded")
+            continue
+        print(f"  whisper {size:<8} downloading (this is the slow one)...",
+              flush=True)
+        try:
+            recognizer.warmup()
+            print(f"  whisper {size:<8} ready on {recognizer.device_used}")
+        except Exception as exc:
+            print(f"  whisper {size:<8} FAILED: {exc}", file=sys.stderr)
+            ok = False
+
+    # --- translation --------------------------------------------------------
+    if not args.skip_translate:
+        print("  nllb              downloading/loading...", flush=True)
+        try:
+            from .ai.translate.nllb import NllbTranslator
+            translator = NllbTranslator()
+            translator.warmup()
+            print("  nllb              ready")
+        except Exception as exc:
+            # Not fatal: the LLM path alone still translates, just slower.
+            print(f"  nllb              FAILED: {exc}", file=sys.stderr)
+            print("                    translation will fall back to the local LLM")
+
+    # --- voice --------------------------------------------------------------
+    if args.voice:
+        print("  xtts              downloading/loading (~1.8 GB)...", flush=True)
+        try:
+            from .ai.tts.xtts import XttsSynthesizer
+            XttsSynthesizer().warmup()
+            print("  xtts              ready")
+        except Exception as exc:
+            print(f"  xtts              FAILED: {exc}", file=sys.stderr)
+            print("                    voice cloning unavailable; the fallback "
+                  "voice still works")
+
+    print("\nDone." if ok else "\nFinished with errors (see above).")
+    return 0 if ok else 1
+
+
 def cmd_models(args) -> int:
     """Show what Vaani would choose for each stage, and WHY.
 
@@ -1970,6 +2034,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--llm-model", default=None,
                    help="pin a translation model (default: auto-detect)")
     p.set_defaults(func=cmd_script)
+
+    p = sub.add_parser("fetch-models",
+                       help="download all models up front (install.sh uses this)")
+    p.add_argument("--voice", action="store_true",
+                   help="also fetch XTTS (~1.8 GB), needed for voice cloning")
+    p.add_argument("--skip-translate", action="store_true",
+                   help="skip the NLLB translation model")
+    p.set_defaults(func=cmd_fetch_models)
 
     p = sub.add_parser("models",
                        help="show which models Vaani would use, and why")
