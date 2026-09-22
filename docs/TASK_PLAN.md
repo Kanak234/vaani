@@ -283,7 +283,24 @@ Could NOT verify here:
       and optionally XTTS up front. This is the real fix for the silent
       first-run problem found in Phase 2; the notice added then was a mitigation.
       Idempotent and resumable.
-- [ ] Dashboard input-mode switch, model status, Script screen
+- [x] Dashboard input-mode switch (always_on / ptt_toggle / ptt_hold, chosen
+      BEFORE Start and applied to the session it creates; also pushed to a
+      running session, which accepts a mid-session switch).
+- [x] Model status: the Models readiness card showed only device placement
+      ("stt=cuda"), which cannot answer the question the user actually has —
+      "what is it using, and is that the good one?". Now reads e.g.
+      `stt=cuda, translation=cuda, tts=cuda · whisper medium · llm
+      phi4-mini:latest · 3684 MiB VRAM free`, and the card asks for attention
+      when the chosen LLM is a DISCOURAGED coder/embed build.
+- [x] Script screen: offline script mode had a CLI and no GUI at all. File
+      picker, progress per chunk, the script shown inline and saved next to the
+      recording, with `[?]` passages called out. Runs off the Tk thread —
+      transcription takes minutes, and freezing the window would freeze the
+      progress label that is the only sign it has not died.
+      6 new UI tests; the existing "all five screens" test is now an exact
+      six-screen check of BOTH `_screens` and `_nav_buttons`, because a screen
+      missing from the rail is unreachable and a rail entry with no screen
+      crashes on click.
 - [x] README rewritten for setup + troubleshooting. Every troubleshooting entry
       is a failure that ACTUALLY happened during development, not a guess:
       the silent model download, the meeting app staying on the real mic, MUTED
@@ -383,3 +400,6 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
   commands verified to exist. Suite 578 green, ruff clean.
   Outstanding in Phase 6: the GUI dashboard work (input-mode switch, model
   status, Script screen) and the rule-4 comment backlog.
+- 2026-09-23 Phase 6 GUI work done. Dashboard input-mode switch, real model
+  status, and a Script screen. Suite 583 green, ruff clean. Phase 6 now complete
+  except the rule-4 comment backlog on pre-existing files.

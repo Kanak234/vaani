@@ -10,6 +10,8 @@ import os
 
 import pytest
 
+from vaani.session.input_mode import InputMode
+
 from vaani.ui.theme import (
     DARK,
     LIGHT,
@@ -97,12 +99,16 @@ def test_dark_is_the_default_palette():
 # --- rendering --------------------------------------------------------------
 
 @needs_display
-def test_app_builds_all_five_screens():
+def test_app_builds_every_screen():
+    """Exact set, not a subset: a screen that exists but is not in the rail is
+    unreachable, and one in the rail that does not exist crashes on click."""
     from vaani.ui.app import VaaniApp
     app = VaaniApp()
     try:
-        assert set(app._screens) == {"dashboard", "meeting", "voice", "settings",
-                                     "diagnostics"}
+        expected = {"dashboard", "meeting", "voice", "script", "settings",
+                    "diagnostics"}
+        assert set(app._screens) == expected
+        assert set(app._nav_buttons) == expected
     finally:
         app.root.destroy()
 
@@ -411,3 +417,79 @@ def test_armed_is_not_active_and_may_still_be_hidden():
         assert overlay.visible is False
     finally:
         root.destroy()
+
+
+# --- dashboard input mode, model status, Script screen (Phase 6) ------------
+
+def _app():
+    from vaani.ui.app import VaaniApp
+    app = VaaniApp()
+    app.root.withdraw()
+    return app
+
+
+@needs_display
+def test_the_script_screen_exists_and_is_reachable():
+    """Offline script mode had a CLI and no GUI at all."""
+    app = _app()
+    try:
+        assert "script" in app._screens
+        assert "script" in app._nav_buttons      # reachable from the rail
+        app.show("script")
+        app.root.update_idletasks()
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_the_dashboard_defaults_to_always_on():
+    """The default must be the one that needs no key: in a normal meeting the
+    user just talks."""
+    app = _app()
+    try:
+        assert app.input_mode is InputMode.ALWAYS_ON
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_choosing_an_input_mode_reaches_the_app():
+    """The switch has to affect the session that Start will create, not just
+    move a radio button."""
+    app = _app()
+    try:
+        dashboard = app._screens["dashboard"]
+        for mode in (InputMode.PTT_HOLD, InputMode.PTT_TOGGLE,
+                     InputMode.ALWAYS_ON):
+            dashboard._mode_var.set(mode.value)
+            dashboard._on_mode_change()
+            assert app.input_mode is mode
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_switching_mode_with_no_session_does_not_crash():
+    """The Dashboard is where you are BEFORE starting, so no session is the
+    normal case."""
+    app = _app()
+    try:
+        assert app.session is None
+        dashboard = app._screens["dashboard"]
+        dashboard._mode_var.set(InputMode.PTT_TOGGLE.value)
+        dashboard._on_mode_change()
+    finally:
+        app.root.destroy()
+
+
+@needs_display
+def test_the_models_card_names_the_models_not_just_the_device():
+    """"stt=cuda" cannot answer the question the user actually has, which is
+    "what is it using, and is that the good one?"."""
+    app = _app()
+    try:
+        ok, text = app.readiness()["Models"]
+        assert isinstance(ok, bool)
+        assert "whisper" in text.lower()
+    finally:
+        app.root.destroy()
