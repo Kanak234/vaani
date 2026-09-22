@@ -21,7 +21,7 @@ from typing import Any
 from ..core.errors import ErrorCode, Severity, VaaniError
 from ..core.types import UtteranceResult
 from ..system.platform import data_dir, is_windows
-from .schema import SCHEMA_VERSION, apply_migrations
+from .schema import apply_migrations
 
 
 def _now() -> str:

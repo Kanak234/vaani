@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import ctypes
 import threading
-import time
 
 import numpy as np
 

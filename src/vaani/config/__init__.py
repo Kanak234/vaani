@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
 
-from ..system.platform import data_dir, config_dir, models_dir
+from ..system.platform import config_dir, models_dir
 
 
 @dataclass

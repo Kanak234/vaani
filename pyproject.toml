@@ -54,3 +54,31 @@ packages = ["src/vaani"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+# WHY this file gained a ruff section: there was no lint config at all, so ruff
+# ran with its own evolving defaults and reported 400 findings - a number too
+# large to act on, which meant lint was never actually used as a gate.
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# WHAT is selected: the rule families that catch genuine defects, not style.
+#   F   - undefined names, unused imports/locals, redefinitions. F821 is the one
+#         that caught the real NameError on the voice-test error path.
+#   E9  - syntax / IO errors.
+#   B   - bugbear: mutable defaults, except-without-from, and B023, the
+#         loop-variable-capture cousin of that same NameError bug.
+# This set is GREEN on src/ as of Phase 1 and is meant to stay green.
+select = ["F", "E9", "B"]
+
+# WHY E501 is not selected: rule 4 asks for heavy explanatory comments, and
+# enforcing an 100-column limit on 191 existing comment lines would be pure
+# churn against the thing the comments exist for.
+# Style families (E4/E7, I, UP, SIM) are deliberately NOT gated yet - they are
+# ~385 findings concentrated in the out-of-v1-scope Windows console. Tracked as
+# backlog in docs/TASK_PLAN.md rather than pretended to be clean.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately shadow fixtures and import for side effects.
+"tests/**" = ["F811", "F401"]

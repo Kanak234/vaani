@@ -35,7 +35,6 @@ safety posture is that it would rather stay silent than mislead.
 from __future__ import annotations
 
 import re
-import time
 from typing import Any
 
 from ...core.errors import ErrorCode, Severity, VaaniError
@@ -174,7 +173,6 @@ class NllbTranslator(TranslationEngine):
         if _DEVANAGARI.search(text) and src != _LANG_CODES["hi"]:
             src = _LANG_CODES["hi"]
 
-        started = time.perf_counter()
         try:
             self._tokenizer.src_lang = src
             tokens = self._tokenizer.convert_ids_to_tokens(
@@ -208,7 +206,10 @@ class NllbTranslator(TranslationEngine):
             self._tokenizer.convert_tokens_to_ids(hypothesis),
             skip_special_tokens=True)
 
-        elapsed_ms = (time.perf_counter() - started) * 1000
+        # NOTE: no local timing here on purpose. core/pipeline._timed()
+        # wraps the "translate" stage and records its duration on both the
+        # success and the failure path, so timing it again here would be a
+        # second, unread number that can only drift out of agreement.
         self._set_health(HealthState.READY)
         return Translation(
             text=normalize_for_speech(out),

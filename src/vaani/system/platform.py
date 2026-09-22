@@ -44,7 +44,7 @@ def runtime_dir() -> Path:
         return _ensure_dir(base / f'vaani-{username}')
     else:
         uid = os.getuid() if hasattr(os, 'getuid') else 1000
-        base = Path(os.environ.get('XDG_RUNTIME_DIR', f'/tmp'))
+        base = Path(os.environ.get('XDG_RUNTIME_DIR', '/tmp'))
         return _ensure_dir(base / f'vaani-{uid}')
 
 def log_dir() -> Path:

@@ -17,7 +17,7 @@ The mode is also fail-closed: an unknown provider is treated as networked.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..core.errors import ErrorCode, Severity, VaaniError
 from .base import Provider, ProviderKind

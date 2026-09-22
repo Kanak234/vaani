@@ -12,7 +12,6 @@ from collections.abc import Callable
 from .theme import (
     FONT_STACK,
     MONO_STACK,
-    RADIUS,
     SPACE,
     STATE_GLYPH,
     STATE_LABEL,

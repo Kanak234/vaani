@@ -163,7 +163,7 @@ class TranslationPipeline:
                 self.sm.force(SessionState.FAILED)
             return self._finish(
                 self._suppress(result, SuppressionReason.STAGE_FAILURE, exc.code.value))
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception:  # pragma: no cover - defensive
             return self._finish(self._suppress(
                 result, SuppressionReason.STAGE_FAILURE, ErrorCode.INTERNAL.value))
 

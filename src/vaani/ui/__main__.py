@@ -1,7 +1,6 @@
 """Entry point for ``python -m vaani.ui``."""
 
 import os
-import sys
 
 
 def main() -> int:

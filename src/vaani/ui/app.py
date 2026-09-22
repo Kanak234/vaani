@@ -16,7 +16,6 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from collections.abc import Callable
 
 from ..core.latency_monitor import BUDGET_MS
 from ..core.state_machine import SessionState
@@ -556,8 +555,18 @@ class VoiceScreen(tk.Frame):
             self.app.root.after(0, lambda: self.app.banner.show(
                 "Played a sample in your voice.", "info"))
         except Exception as exc:
-            self.app.root.after(0, lambda: self.app.banner.show(
-                f"Could not test the voice: {exc}", "error"))
+            # WHY the str() and the default argument: Python unbinds `exc` the
+            # moment this except block ends, but `root.after(0, ...)` defers the
+            # lambda to the next tkinter loop iteration - by then a late-bound
+            # `exc` is gone and the lambda dies with NameError, so the user is
+            # told nothing and the voice-test failure is silently swallowed.
+            # Flattening to a string here, and binding it as a default arg,
+            # captures the value at raise time instead of at call time.
+            # WHERE IT GOES NEXT: the banner widget, on the tkinter main thread
+            # (this method runs on a worker thread, which is why it must defer).
+            message = str(exc)
+            self.app.root.after(0, lambda msg=message: self.app.banner.show(
+                f"Could not test the voice: {msg}", "error"))
 
     def _delete(self, profile_id: str) -> None:
         from ..voice.enrollment import VoiceProfileStore

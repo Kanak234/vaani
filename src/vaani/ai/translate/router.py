@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import re
 
-from ...core.errors import ErrorCode, Severity, VaaniError
+from ...core.errors import ErrorCode, VaaniError
 from ...core.types import Translation
 from ..base import HealthState, TranslationEngine
 

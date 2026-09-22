@@ -73,8 +73,13 @@ class ControlServer:
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 self._sock.bind(self.path)
-            except OSError:
-                raise RuntimeError("another Vaani instance is already running")
+            except OSError as err:
+                # WHY `from err`: the bind almost always fails with EADDRINUSE
+                # (a second Vaani), but it can also fail for a permission or
+                # network-stack reason. Chaining keeps the real errno in the
+                # traceback so a mis-diagnosed "already running" is debuggable.
+                raise RuntimeError(
+                    "another Vaani instance is already running") from err
 
         self._sock.listen(4)
         self._sock.settimeout(0.5)

@@ -3,22 +3,20 @@ from __future__ import annotations
 
 import os
 import sys
-import json
 import time
 import queue
 import logging
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from dataclasses import dataclass
+from tkinter import ttk, filedialog
 from pathlib import Path
 from typing import Any
 
 if os.name != 'nt':
     raise SystemExit('The Windows Vaani console is Windows-only.')
 
-from .theme import Palette, DARK, LIGHT, state_colour, STATE_GLYPH, STATE_LABEL, FONT_STACK, SPACE, TYPE
-from .components import Card, StatusPill, Button, MetricReadout, LevelMeter, Banner, LatencyBar, DiagnosticRow
+from .theme import DARK, FONT_STACK
+from .components import Card, StatusPill, Button, MetricReadout, Banner, LatencyBar, DiagnosticRow
 
 logger = logging.getLogger('vaani.ui')
 
@@ -658,7 +656,7 @@ def main() -> int:
         app = WindowsVaaniConsole()
         app.mainloop()
         return 0
-    except Exception as e:
+    except Exception:
         logging.getLogger('vaani.ui').exception('Fatal GUI error')
         return 1
 

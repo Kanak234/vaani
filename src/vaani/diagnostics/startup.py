@@ -147,7 +147,11 @@ def run_startup_discovery(
     # 4. STT Discovery
     def _stt():
         try:
-            import faster_whisper
+            # WHY the bare import: this IS the check. Importing is the only
+            # honest way to prove the wheel loads on this machine - find_spec
+            # would report a package that still fails to import (wrong CUDA
+            # build, bad ABI). noqa because "unused" is the point.
+            import faster_whisper  # noqa: F401
             return "pass", "faster-whisper available"
         except ImportError:
             return "warn", "faster-whisper not installed — STT unavailable"

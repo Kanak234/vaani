@@ -34,7 +34,7 @@ def cmd_devices(args) -> int:
 
 
 def cmd_doctor(args) -> int:
-    from .diagnostics.checks import run_all, CheckResult
+    from .diagnostics.checks import run_all
     print("=" * 72)
     print("VAANI DIAGNOSTICS")
     print("=" * 72)
@@ -57,7 +57,7 @@ def cmd_virtualmic(args) -> int:
     from .devices.manager import VirtualMicrophone
     if args.action == "create":
         mic = VirtualMicrophone.create()
-        print(f"Virtual microphone ready.")
+        print("Virtual microphone ready.")
         print(f"  Applications select : {mic.node_name}  ('Vaani Virtual Microphone')")
         print(f"  Vaani writes to     : {mic.sink_name}")
         print(f"  Owned by this call  : {mic._owned}")
@@ -168,7 +168,7 @@ def cmd_enroll(args) -> int:
         if not args.profile_id:
             print("Specify --profile-id (see `vaani enroll list`).", file=sys.stderr)
             return 2
-        print(f"This permanently deletes the voice profile and its recordings.")
+        print("This permanently deletes the voice profile and its recordings.")
         if (args.yes or input("Type DELETE to confirm: ").strip()) not in ("DELETE", True):
             if not args.yes:
                 print("Aborted.")
@@ -180,7 +180,7 @@ def cmd_enroll(args) -> int:
     print("=" * 72)
     print("VOICE ENROLLMENT")
     print("=" * 72)
-    print(f"Read the prompts below aloud, naturally. Need >= 45s of speech.\n")
+    print("Read the prompts below aloud, naturally. Need >= 45s of speech.\n")
     for i, prompt in enumerate(ENROLLMENT_PROMPTS, 1):
         print(f"  {i}. {prompt}")
     print(f"\nRecording starts now for up to {args.seconds}s. Ctrl+C to stop early.\n")
@@ -409,8 +409,8 @@ def cmd_run(args) -> int:
         return 2
 
     if session._virtual_mic:
-        print(f"Virtual microphone live: 'Vaani Virtual Microphone'")
-        print(f"  Select it as your mic in Zoom / Meet / Teams.")
+        print("Virtual microphone live: 'Vaani Virtual Microphone'")
+        print("  Select it as your mic in Zoom / Meet / Teams.")
     print(f"Mode: {args.mode}   Listening. Press Ctrl+C to stop.\n")
 
     try:
@@ -489,7 +489,7 @@ def cmd_transcribe(args) -> int:
         print(f"ERROR: could not open the microphone: {exc}", file=sys.stderr)
         return 2
 
-    print(f"\nListening. Speak in Hindi, English or Hinglish. Ctrl+C to stop.")
+    print("\nListening. Speak in Hindi, English or Hinglish. Ctrl+C to stop.")
     print(f"(pause {seg_cfg.hangover_ms} ms to end an utterance)\n")
 
     seq = 0
@@ -746,8 +746,6 @@ def cmd_meeting(args) -> int:
     from .ai.stt.whisper import FasterWhisperRecognizer
     from .ai.tts.fallback import FallbackSynthesizer
     from .ai.translate.nllb import NllbTranslator
-    from .ai.translate.ollama import OllamaTranslator
-    from .ai.translate.router import RoutingTranslator
     from .ai.vad.energy import EnergyVad
     from .core.state_machine import SessionState
     from .ipc.control import ControlServer
@@ -996,7 +994,7 @@ def cmd_meeting(args) -> int:
     print("  In your meeting app, select microphone:")
     print("    Vaani Virtual Microphone")
     print()
-    from .devices.routing import AutoRouter, list_capture_streams
+    from .devices.routing import AutoRouter
     router = AutoRouter(real_source=args.input) if args.auto_route else None
 
     def check_routing() -> None:

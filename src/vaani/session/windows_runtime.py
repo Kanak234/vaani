@@ -17,7 +17,6 @@ CPU_OLLAMA_PORT = 11435
 
 
 def _ollama_executable() -> str:
-    import shutil
     from pathlib import Path
     which = shutil.which("ollama")
     if which:

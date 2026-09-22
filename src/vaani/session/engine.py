@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -31,14 +30,14 @@ import os
 
 if os.name == 'nt':
     from ..audio.backend.windows_backend import WindowsCaptureStream as CaptureStream, WindowsPlaybackStream as PlaybackStream
-    from ..devices.windows_manager import VirtualMicrophone, assert_no_feedback_loop, list_sources
+    from ..devices.windows_manager import VirtualMicrophone, assert_no_feedback_loop
 else:
     from ..audio.backend.pulse_backend import PulseCaptureStream as CaptureStream, PulsePlaybackStream as PlaybackStream
     from ..devices.manager import VirtualMicrophone, assert_no_feedback_loop
 
 from ..audio.segmenter import SegmenterConfig, UtteranceSegmenter
 from ..context.engine import ContextConfig, ContextEngine
-from ..core.errors import ErrorCode, Severity, VaaniError
+from ..core.errors import VaaniError
 from ..core.gate import ConfidenceGate, GateConfig
 from ..core.latency_monitor import LatencyMonitor
 from ..core.pipeline import PipelineConfig, TranslationPipeline
