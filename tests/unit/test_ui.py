@@ -339,3 +339,75 @@ def test_enrollment_progress_counts_speech_not_wall_clock():
         d._cancel()
     finally:
         app.root.destroy()
+
+
+# --- the AI-speaking indicator (Phase 4) ------------------------------------
+#
+# The requirement is that a clear on-screen indicator shows when Vaani is
+# speaking INSTEAD OF the user. An indicator that can be dismissed while it is
+# true is not an indicator, so these cover both directions: it forces itself
+# up, and it refuses to go away.
+
+def _overlay():
+    """Helper, not a test - the skip marker belongs on the tests below."""
+    import tkinter as tk
+
+    from vaani.ui.overlay import MeetingOverlay
+    root = tk.Tk()
+    root.withdraw()
+    return root, MeetingOverlay(root, start_hidden=True)
+
+
+@needs_display
+def test_takeover_going_active_forces_a_hidden_overlay_into_view():
+    """Meeting mode runs hidden by default, so without this the AI could speak
+    in the user's cloned voice with nothing on screen at all."""
+    root, overlay = _overlay()
+    try:
+        overlay.hide()
+        assert overlay.visible is False
+        overlay.set_takeover("active")
+        assert overlay.visible is True
+    finally:
+        root.destroy()
+
+
+@needs_display
+def test_the_overlay_refuses_to_hide_while_vaani_is_speaking_for_the_user():
+    """`vaani hide` during an active takeover used to leave the user with
+    their own cloned voice in a meeting and no indication of it."""
+    root, overlay = _overlay()
+    try:
+        overlay.set_takeover("active")
+        overlay.hide()
+        assert overlay.visible is True      # refused
+    finally:
+        root.destroy()
+
+
+@needs_display
+def test_hiding_works_again_once_the_takeover_ends():
+    """The guarantee is scoped to "while speaking", not permanent."""
+    root, overlay = _overlay()
+    try:
+        overlay.set_takeover("active")
+        overlay.hide()
+        assert overlay.visible is True
+        overlay.set_takeover("off")
+        overlay.hide()
+        assert overlay.visible is False
+    finally:
+        root.destroy()
+
+
+@needs_display
+def test_armed_is_not_active_and_may_still_be_hidden():
+    """ARMED means it COULD speak, not that it IS. Forcing the overlay up for
+    merely-armed would make the indicator meaningless through overuse."""
+    root, overlay = _overlay()
+    try:
+        overlay.set_takeover("armed")
+        overlay.hide()
+        assert overlay.visible is False
+    finally:
+        root.destroy()

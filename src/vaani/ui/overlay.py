@@ -139,14 +139,28 @@ class MeetingOverlay:
         self._visible = True
 
     def hide(self) -> None:
-        """Vanish completely — no window, no taskbar entry.
+        """Vanish completely - no window, no taskbar entry.
 
         Translation keeps running. This hides the interface, not the engine.
+
+        REFUSES WHILE VAANI IS SPEAKING FOR THE USER. The requirement is that a
+        clear on-screen indicator shows when the AI is talking instead of the
+        user; an indicator that can be dismissed while it is true is not an
+        indicator. Before this, `vaani hide` during an active takeover left the
+        user with their own cloned voice in a meeting and nothing on screen
+        saying so.
+
+        Returns without hiding rather than raising: a refused hotkey should be
+        a no-op, not a crash.
         """
+        if self._takeover_state == "active":
+            return
         self.win.withdraw()
         self._visible = False
 
     def toggle(self) -> bool:
+        # hide() self-censors during an active takeover, so toggle inherits
+        # that guarantee rather than restating it.
         self.hide() if self._visible else self.show()
         return self._visible
 
@@ -173,6 +187,13 @@ class MeetingOverlay:
         if state == self._takeover_state:
             return                      # avoid needless Tk work every poll tick
         self._takeover_state = state
+        # FORCE THE OVERLAY UP when Vaani starts speaking for the user. The
+        # overlay is normally hidden in meeting mode, so without this the AI
+        # could speak in the user's cloned voice with nothing on screen at all.
+        # Raising it is deliberately not conditional on `self._visible`: the
+        # whole point is to override the user's earlier "hide".
+        if state == "active":
+            self.show()
         p = self.palette
         label, colour = {
             "armed": ("● TAKEOVER ARMED", p.state_warn),

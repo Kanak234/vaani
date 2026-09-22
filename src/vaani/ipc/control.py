@@ -37,7 +37,13 @@ COMMANDS = frozenset({"show", "hide", "toggle", "pause", "resume", "mute",
                       # voice on the virtual mic; `talk` is push-to-talk; `mode`
                       # switches between always-on and the two PTT flavours.
                       "bypass-on", "bypass-off", "bypass", "talk",
-                      "mode-always-on", "mode-ptt-toggle", "mode-ptt-hold"})
+                      "mode-always-on", "mode-ptt-toggle", "mode-ptt-hold",
+                      # Phase 4 Takeover A: finish the user's own point.
+                      # `cancel` is separate from `takeover-stop` on purpose --
+                      # it stops Vaani speaking RIGHT NOW without changing
+                      # whether takeover stays armed, which is what someone
+                      # reaching for a cancel key in a meeting means.
+                      "continue", "continue-arm", "continue-off", "cancel"})
 
 
 from typing import Union

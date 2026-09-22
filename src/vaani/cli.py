@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 
 def _get_user_id() -> str:
@@ -958,6 +959,69 @@ def cmd_meeting(args) -> int:
 
     session._on_result = on_result
 
+    # ------------------------------------------------- Takeover A (continue)
+    # Finishes the USER'S OWN point when they stall or press the key. Distinct
+    # from Takeover B below, which answers the OTHER participant. See
+    # session/continuation.py for why the risk profile is different and every
+    # default here is conservative.
+    #
+    # Only built when an LLM is actually available: without one there is
+    # nothing to draft with, and a `vaani continue` that silently does nothing
+    # is worse than one that says why.
+    continuation = None
+    _llm_for_continue = getattr(translator, "accurate", None) or (
+        translator if hasattr(translator, "generate_raw") else None)
+    if _llm_for_continue is not None:
+        from .session.continuation import (
+            ContinuationEngine, OllamaCompletion,
+        )
+        continuation = ContinuationEngine(
+            llm=OllamaCompletion(_llm_for_continue))
+
+        _previous_on_result = session._on_result
+
+        def on_result_with_continuation(result) -> None:
+            # CHAINS onto the existing callback rather than replacing it - the
+            # same trap documented for takeover below.
+            if _previous_on_result is not None:
+                _previous_on_result(result)
+            # Feed the user's OWN words, not the English translation: the LLM
+            # must continue what they actually said, not a paraphrase of it.
+            if result.transcript is not None and not result.suppressed:
+                continuation.note_user_speech(result.transcript.text)
+
+        session._on_result = on_result_with_continuation
+
+    def _speak_continuation(trigger) -> dict:
+        """Draft the finish of the user's point and speak it in their voice.
+
+        The AI-SPEAKING indicator is raised BEFORE synthesis and lowered only
+        after the audio is queued, so the badge can never lag behind what the
+        meeting hears. overlay.set_takeover("active") also force-shows a hidden
+        overlay and refuses to be dismissed while it is true.
+        """
+        if continuation is None:
+            return {"error": "no local LLM available; `vaani models` explains why"}
+        result = continuation.draft(trigger)
+        if result.text is None:
+            # Declining is normal and must not look like a failure.
+            return {"continuation": None, "reason": result.reason}
+
+        root.after(0, lambda: overlay.set_takeover("active"))
+        try:
+            audio = synthesizer.synthesize(
+                result.text, voice_profile_id=voice_profile_id)
+            # Checked again here: the user may have cancelled DURING synthesis,
+            # which on this hardware takes seconds.
+            if continuation._cancelled.is_set():
+                return {"continuation": None, "reason": "cancelled during synthesis"}
+            session.inject_audio(audio.samples)
+        except Exception as exc:
+            return {"error": f"could not speak the continuation: {exc}"}
+        finally:
+            root.after(0, lambda: overlay.set_takeover("off"))
+        return {"continuation": result.text, "reason": result.reason}
+
     # ------------------------------------------------------------- takeover
     # F-21. This is the unification: until now `vaani meeting` could translate
     # but never hear the other side, while MeetingTakeoverApp could take over
@@ -1045,6 +1109,26 @@ def cmd_meeting(args) -> int:
             session.set_input_mode(mode)
             root.after(0, lambda: overlay.set_input_mode(
                 session.input_mode.state().label))
+        elif command in ("continue", "continue-arm", "continue-off", "cancel"):
+            if continuation is None:
+                return {"error": "no local LLM available for continuations"}
+            if command == "cancel":
+                # Must be the cheapest path in the file: it is the key the user
+                # reaches for when Vaani is saying something they disagree with.
+                continuation.cancel()
+                session.emergency_stop_audio_only() \
+                    if hasattr(session, "emergency_stop_audio_only") \
+                    else session._flush_pending_audio()
+                root.after(0, lambda: overlay.set_takeover("off"))
+                return {"cancelled": True}
+            if command == "continue-arm":
+                continuation.arm()
+                return {"continue_armed": True}
+            if command == "continue-off":
+                continuation.disarm()
+                return {"continue_armed": False}
+            from .session.continuation import ContinuationTrigger as _Trig
+            return _speak_continuation(_Trig.HOTKEY)
         elif command.startswith("takeover-"):
             if takeover_rt is None:
                 return {"error": "takeover is not enabled; restart with "
@@ -1200,6 +1284,41 @@ def cmd_meeting(args) -> int:
 
     root.after(3000, check_routing)
 
+    def check_stall() -> None:
+        """Poll for a stall and continue the user's point if one is armed.
+
+        WHY ITS OWN TICK rather than riding check_routing's 3 s timer: the
+        stall threshold is 4 s, so a 3 s poll would fire anywhere between 4 and
+        7 s after the user trailed off - by which point the moment has passed
+        and Vaani would be interrupting whatever came next.
+
+        WHY A THREAD: drafting calls the LLM, which takes seconds on this
+        hardware. Doing that on the Tk thread would freeze the overlay - and
+        with it the AI-SPEAKING badge and the cancel path, which is precisely
+        when the user needs both.
+        """
+        if continuation is not None and continuation.armed:
+            ready, reason = continuation.should_continue()
+            if ready:
+                # Disarm first so this cannot re-fire while the draft is in
+                # flight and stack two continuations on top of each other.
+                continuation.disarm()
+                from .session.continuation import ContinuationTrigger as _T
+
+                def run() -> None:
+                    outcome = _speak_continuation(_T.STALL)
+                    text = outcome.get("continuation")
+                    if text:
+                        print(f"  [continued for you] {text}")
+                    elif outcome.get("error"):
+                        print(f"  [continue] {outcome['error']}", file=sys.stderr)
+
+                threading.Thread(target=run, name="vaani-continue",
+                                 daemon=True).start()
+        root.after(500, check_stall)
+
+    root.after(500, check_stall)
+
     print("  Control it from any terminal, or bind these to KDE shortcuts:")
     print("    vaani show     vaani hide     vaani toggle")
     print("    vaani pause    vaani mute     vaani panic")
@@ -1302,6 +1421,26 @@ def cmd_control(args) -> int:
     if not reply.get("ok"):
         print(reply.get("error", "failed"), file=sys.stderr)
         return 1
+    # WHY THESE ECHO: a control command that prints nothing is
+    # indistinguishable from one that silently failed. That matters most for
+    # `continue`, where the honest outcome is usually a REFUSAL ("not enough
+    # context to continue a point") - and a user who sees no output concludes
+    # the feature is broken rather than that Vaani declined on purpose.
+    if args.command in ("continue", "continue-arm", "continue-off", "cancel"):
+        if "continuation" in reply:
+            text = reply.get("continuation")
+            if text:
+                print(f"spoke for you: {text}")
+            else:
+                print(f"declined: {reply.get('reason', 'no reason given')}")
+        elif reply.get("cancelled"):
+            print("cancelled - Vaani has stopped speaking for you")
+        elif "continue_armed" in reply:
+            print("continuations ARMED - Vaani may finish your point when "
+                  "you stall" if reply["continue_armed"]
+                  else "continuations off")
+        return 0
+
     if args.command == "status":
         from .devices.manager import virtual_mic_consumers
         consumers = virtual_mic_consumers()
@@ -1592,7 +1731,15 @@ def main(argv: list[str] | None = None) -> int:
                            ("mode-ptt-toggle",
                             "translate only after `vaani talk`"),
                            ("mode-ptt-hold",
-                            "translate only while the talk key is held")):
+                            "translate only while the talk key is held"),
+                           # Phase 4 Takeover A.
+                           ("continue",
+                            "finish YOUR point in your voice, right now"),
+                           ("continue-arm",
+                            "let Vaani finish your point when you stall"),
+                           ("continue-off", "stop automatic continuations"),
+                           ("cancel",
+                            "STOP Vaani speaking for you, immediately")):
         sp = sub.add_parser(name, help=helptext)
         sp.set_defaults(func=cmd_control, command=name)
 

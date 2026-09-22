@@ -191,13 +191,53 @@ Could NOT verify here:
       is not yet cached here.
 
 ## Phase 4 — Takeover
-- [ ] `session/continuation.py` (Takeover A) + tests
+- [x] `session/continuation.py` (Takeover A: finish the USER'S OWN point).
+      36 tests. Most of them assert it REFUSING to speak, because the risk here
+      is being wrong about what the user THINKS, in their own cloned voice, to
+      their colleagues. Refuses when: not armed, context < 40 chars, the
+      sentence already landed (terminal punctuation), the other participant
+      spoke last, before the 4 s stall threshold, or the model returns PASS.
+      The unfinished-ending word list is deliberately conservative — a MISSING
+      word means Vaani stays quiet, which is the safe direction. It initially
+      missed the most ordinary English stall there is ("...is going to be");
+      auxiliaries, modals and prepositions were added after the tests caught it.
 - [~] Takeover B: `session/remote_listener.py` + cli `takeover` + ipc verbs +
       `overlay.set_takeover()` landed; end-to-end Linux meeting wiring unproven
-- [ ] AI-tagged output + `cancel` ≤200 ms + tests (measure like measure_emergency_stop)
-- [ ] Overlay AI-SPEAKING banner (can't be hidden)
-- [ ] CLI/IPC: takeover, cancel
-- [~] Manual: speaks in his voice (needs enrolled voice)
+- [x] `cancel` ≤200 ms — **MEASURED**, `tests/manual/measure_takeover_cancel.py`:
+      | what | p50 | worst | budget |
+      |---|---|---|---|
+      | cancel() returns | 0.001 ms | 0.006 ms | 200 ms |
+      | cancel during a live 2 s draft | — | 0.017 ms | 200 ms |
+      | queued AI audio dropped | 0.099 ms | 0.132 ms | 200 ms |
+      And the case that matters most, asserted rather than timed: a draft in
+      flight when cancel fires is NEVER spoken. A generation counter handles the
+      nastier variant — re-arming before a cancelled draft returns must not let
+      the stale text through.
+- [x] Overlay AI-SPEAKING indicator that **cannot be dismissed while true**.
+      Found while implementing: `hide()` withdrew the window entirely, so
+      `vaani hide` during an active takeover left the user with their own cloned
+      voice in a meeting and NOTHING on screen saying so. Now `set_takeover
+      ("active")` force-shows a hidden overlay and `hide()` refuses while
+      active. ARMED deliberately does NOT force-show — it means it COULD speak,
+      and forcing the overlay up for that would make the indicator meaningless
+      through overuse. 4 UI tests.
+- [x] CLI/IPC: `continue`, `continue-arm`, `continue-off`, `cancel`, wired into
+      `vaani meeting` with a dedicated 500 ms stall poll (the existing 3 s tick
+      would fire 4–7 s after the user trailed off, by which point Vaani would be
+      interrupting whatever came next). Drafting runs off the Tk thread, because
+      freezing the overlay would freeze the AI-SPEAKING badge and the cancel
+      path — exactly when both are needed.
+      **Verified live:** `continue` → "declined: not enough context to continue
+      a point"; `continue-arm` → "continuations ARMED"; `cancel` → "cancelled".
+      Commands that printed nothing were fixed: silence is indistinguishable
+      from a broken feature, and for `continue` the honest outcome is usually a
+      refusal.
+- [~] Manual: speaks in HIS voice — **NOT VERIFIED and not verifiable here.**
+      Needs (a) Kanak speaking Hindi/Hinglish into the mic and (b) an enrolled
+      XTTS voice profile. What IS verified is the decision logic, the command
+      surface, the cancel budget and the indicator. What is NOT is whether the
+      continuation sounds like him or says something he would actually say —
+      which is the whole point of the feature.
 
 ## Phase 5 — Offline script mode
 - [ ] `session/script_mode.py` + chunk checkpoints + tests
@@ -270,3 +310,8 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
   VAANI_FORCE_CPU so the CPU branch is testable at all. Suite 486 green, ruff
   clean. Remaining in Phase 3: bench_cache.py (may not be needed) and
   verify_phase3.sh.
+- 2026-09-23 Phase 4 done except the voice check. Takeover A (continuation)
+  implemented with a deliberately refusal-heavy design; cancel measured at
+  0.017 ms worst case against a 200 ms budget; AI-speaking indicator made
+  undismissable after finding `vaani hide` could conceal an active takeover.
+  Suite 526 green, ruff clean.

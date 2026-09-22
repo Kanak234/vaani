@@ -65,7 +65,9 @@ def test_command_vocabulary_is_closed():
                                 "takeover-arm", "takeover-stop", "takeover-now",
                                 "bypass-on", "bypass-off", "bypass", "talk",
                                 "mode-always-on", "mode-ptt-toggle",
-                                "mode-ptt-hold"}
+                                "mode-ptt-hold",
+                                "continue", "continue-arm", "continue-off",
+                                "cancel"}
 
 
 def test_handler_exception_does_not_kill_the_server(sock):
