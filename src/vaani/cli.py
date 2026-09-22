@@ -11,6 +11,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 def _get_user_id() -> str:
     if os.name == 'nt':
@@ -33,6 +34,194 @@ def cmd_devices(args) -> int:
     print("\nPLAYBACK DEVICES (use with --monitor)")
     for d in list_sinks():
         print(f"  {d.display_name}\n      key: {d.key}")
+    return 0
+
+
+def _load_audio_16k_mono(path: Path) -> "tuple[object, int]":
+    """Read any soundfile-supported file as 16 kHz mono float32.
+
+    WHY THE CONVERSIONS ARE HERE and not left to the caller: Whisper expects
+    16 kHz mono, and a phone recording is routinely 44.1/48 kHz stereo. Passing
+    that through unchanged does not error - it transcribes badly, which is far
+    harder for the user to diagnose than a crash would be.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    audio, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+    # Mono by averaging rather than taking channel 0: a recording where the
+    # speaker is louder on one channel would otherwise lose half its level.
+    mono = audio.mean(axis=1).astype(np.float32)
+
+    target = 16000
+    if sample_rate != target:
+        # Linear resampling. Good enough for speech recognition and dependency
+        # free; scipy/librosa would be better for music and are not worth a
+        # heavyweight dependency here.
+        duration = len(mono) / sample_rate
+        new_length = int(duration * target)
+        if new_length <= 0:
+            return np.zeros(0, dtype=np.float32), target
+        source_index = np.linspace(0, len(mono) - 1, new_length)
+        mono = np.interp(source_index, np.arange(len(mono)), mono).astype(np.float32)
+    return mono, target
+
+
+def cmd_script(args) -> int:
+    """Offline script mode: a recording in, an English script out.
+
+    For presentation prep, not live meetings. See session/script_mode.py for
+    why this inverts the live pipeline's trade-offs - nothing is dropped and
+    low-confidence text is kept and marked rather than suppressed.
+    """
+    import numpy as np
+
+    from .ai.stt.whisper import FasterWhisperRecognizer
+    from .ai.translate.nllb import NllbTranslator
+    from .session.script_mode import ScriptConfig, ScriptJob
+
+    # ---------------------------------------------------------- get audio
+    if args.record:
+        from .audio.backend.pulse_backend import PulseCaptureStream
+        print(f"Recording {args.record:.0f}s from the microphone. "
+              f"Speak now (Ctrl+C to stop early)...")
+        capture = PulseCaptureStream(device=args.input, sample_rate=16000,
+                                     frame_ms=20)
+        frames, deadline = [], time.monotonic() + args.record
+        try:
+            while time.monotonic() < deadline:
+                frames.append(capture.read_frame())
+        except KeyboardInterrupt:
+            print("\n  stopped early.")
+        finally:
+            capture.close()
+        audio = (np.concatenate(frames) if frames
+                 else np.zeros(0, dtype=np.float32))
+        sample_rate = 16000
+        if args.save_recording:
+            import soundfile as sf
+            sf.write(args.save_recording, audio, sample_rate)
+            print(f"  raw recording saved to {args.save_recording}")
+    else:
+        source = Path(args.file)
+        if not source.exists():
+            print(f"ERROR: no such file: {source}", file=sys.stderr)
+            return 2
+        try:
+            audio, sample_rate = _load_audio_16k_mono(source)
+        except Exception as exc:
+            print(f"ERROR: could not read {source}: {exc}", file=sys.stderr)
+            return 2
+
+    if audio.size == 0:
+        print("ERROR: no audio to transcribe.", file=sys.stderr)
+        return 2
+    duration = audio.size / sample_rate
+    print(f"  {duration:.1f}s of audio")
+
+    # ------------------------------------------------------- the providers
+    recognizer = FasterWhisperRecognizer.for_mode(PerformanceMode(args.mode))
+    if not recognizer.is_cached():
+        print(f"  first run: downloading the '{recognizer.model_size}' speech "
+              f"model (once; can take several minutes)...", flush=True)
+    try:
+        recognizer.warmup()
+    except Exception as exc:
+        print(f"ERROR: recognition unavailable: {exc}", file=sys.stderr)
+        return 2
+    print(f"  recognition: {recognizer.model_size} on {recognizer.device_used}")
+
+    fast = NllbTranslator()
+    try:
+        translator, note = _build_translator(fast, args)
+    except VaaniError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print(f"  translation: {note}")
+
+    # ------------------------------------------------------------- the run
+    out_path = Path(args.out) if args.out else Path("vaani_script.txt")
+    # The checkpoint lives beside the output so a resumed run is obvious to the
+    # user and easy to delete. See script_mode.py: the target desktop crashes
+    # under exactly this kind of long sustained load.
+    checkpoint = out_path.with_suffix(out_path.suffix + ".progress.json")
+
+    def progress(done: int, total: int, segment) -> None:
+        flag = " [?]" if segment.uncertain else ""
+        if segment.error:
+            flag = f"  ERROR: {segment.error}"
+        print(f"  chunk {done}/{total} ({segment.end_s:.0f}s){flag}", flush=True)
+
+    job = ScriptJob(audio=audio, sample_rate=sample_rate,
+                    recognizer=recognizer, translator=translator,
+                    config=ScriptConfig(chunk_s=args.chunk_seconds),
+                    checkpoint_path=checkpoint)
+    result = job.run(progress=progress)
+    if result.resumed_from:
+        print(f"  resumed from chunk {result.resumed_from} "
+              f"(previous run's checkpoint)")
+
+    script = result.script_text()
+    out_path.write_text(script + "\n", encoding="utf-8")
+    print(f"\nEnglish script -> {out_path}")
+
+    if args.source_out:
+        Path(args.source_out).write_text(result.source_text() + "\n",
+                                         encoding="utf-8")
+        print(f"Original (Hindi/Hinglish) -> {args.source_out}")
+
+    # ------------------------------------------------------- optional audio
+    if args.audio:
+        synthesizer, profile_id = None, None
+        try:
+            from .ai.tts.xtts import XttsSynthesizer
+            from .voice.enrollment import VoiceProfileStore
+            profile = VoiceProfileStore().active()
+            if profile is None:
+                raise RuntimeError("no enrolled voice profile; run `vaani enroll`")
+            profile_id = profile.id
+            synthesizer = XttsSynthesizer()
+            synthesizer.warmup()
+        except Exception as exc:
+            print(f"  voice unavailable ({exc}); writing the script only",
+                  file=sys.stderr)
+            synthesizer = None
+        if synthesizer is not None:
+            import soundfile as sf
+            pieces = []
+            for segment in result.segments:
+                if not segment.english_text.strip():
+                    continue
+                try:
+                    out = synthesizer.synthesize(segment.english_text,
+                                                 voice_profile_id=profile_id)
+                    pieces.append(out.samples)
+                    # A short gap between paragraphs, so the rehearsal track has
+                    # the pauses the speaker will actually take.
+                    pieces.append(np.zeros(int(out.sample_rate * 0.4),
+                                           dtype=np.float32))
+                except Exception as exc:
+                    print(f"  chunk {segment.index} not synthesised: {exc}",
+                          file=sys.stderr)
+            if pieces:
+                audio_path = Path(args.audio)
+                sf.write(str(audio_path), np.concatenate(pieces), 24000)
+                print(f"English audio (your voice) -> {audio_path}")
+
+    # --------------------------------------------------------- the summary
+    print(f"\n{len(result.segments)} chunks, {result.elapsed_s:.0f}s of work "
+          f"for {result.audio_seconds:.0f}s of audio")
+    uncertain = sum(1 for s in result.segments if s.uncertain)
+    if uncertain:
+        print(f"{uncertain} chunk(s) marked [?] - low confidence, check those")
+    if result.failed_chunks:
+        # Announced, never hidden: a script with holes must say so.
+        print(f"{result.failed_chunks} chunk(s) FAILED - see the script",
+              file=sys.stderr)
+        return 1
+    # Only remove the checkpoint on a clean run, so a partial one stays
+    # resumable.
+    checkpoint.unlink(missing_ok=True)
     return 0
 
 
@@ -1757,6 +1946,30 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("devices", help="list audio devices")
     p.add_argument("--all", action="store_true", help="include monitor sources")
     p.set_defaults(func=cmd_devices)
+
+    p = sub.add_parser("script",
+                       help="offline: a recording -> an English script")
+    p.add_argument("file", nargs="?",
+                   help="audio file to transcribe (wav/flac/ogg/mp3...)")
+    p.add_argument("--record", type=float, metavar="SECONDS",
+                   help="record from the microphone instead of reading a file")
+    p.add_argument("--input", help="capture device key, with --record")
+    p.add_argument("--save-recording", metavar="PATH",
+                   help="also keep the raw recording made by --record")
+    p.add_argument("--out", metavar="PATH",
+                   help="where to write the English script "
+                        "(default: vaani_script.txt)")
+    p.add_argument("--source-out", metavar="PATH",
+                   help="also write the original Hindi/Hinglish transcript")
+    p.add_argument("--audio", metavar="PATH",
+                   help="also synthesise the script in your cloned voice")
+    p.add_argument("--chunk-seconds", type=float, default=25.0,
+                   help="chunk length; shorter means more frequent checkpoints")
+    p.add_argument("--mode", default="balanced",
+                   choices=[m.value for m in PerformanceMode])
+    p.add_argument("--llm-model", default=None,
+                   help="pin a translation model (default: auto-detect)")
+    p.set_defaults(func=cmd_script)
 
     p = sub.add_parser("models",
                        help="show which models Vaani would use, and why")

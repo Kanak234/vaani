@@ -240,10 +240,32 @@ Could NOT verify here:
       which is the whole point of the feature.
 
 ## Phase 5 — Offline script mode
-- [ ] `session/script_mode.py` + chunk checkpoints + tests
-- [ ] `vaani script FILE | --record [--audio] [--out]`
-- [ ] Fixture check: Hinglish cases → correct English
-- [~] Kanak's own recording
+- [x] `session/script_mode.py` + chunk checkpoints. 33 tests. Offline inverts
+      every live trade-off on purpose: nothing is dropped, low-confidence text is
+      KEPT and marked `[?]` rather than suppressed (the user is going to read and
+      edit it anyway), and progress is checkpointed after EVERY chunk because the
+      target desktop crashes under exactly this kind of long sustained load.
+      Chunks cut at the quietest point near the target rather than on a fixed
+      window, which would corrupt one word per window with nothing able to tell.
+- [x] `vaani script FILE | --record [--audio] [--out] [--source-out]`.
+      Handles 44.1 kHz stereo input (resample + mono-by-averaging), because a
+      phone recording passed through unchanged does not error — it just
+      transcribes badly, which is far harder to diagnose than a crash.
+- [x] Fixture check — 2 new integration tests run the fixtures through
+      ScriptJob's own path with the REAL NLLB translator, and assert no
+      Devanagari survives into the script (AC-06.3 applies to the written script
+      too). 19 integration tests pass.
+- [x] **Verified end to end on a real file**, which is what caught both bugs
+      below: 13 s → 4 chunks → script written, resume confirmed
+      ("resumed from chunk 18", 0 s of work instead of ~30 s), and the checkpoint
+      correctly retained after a failed run so it stays resumable.
+- [~] Kanak's own recording — NOT DONE and not doable here. There is no TTS on
+      this machine (no espeak/festival/flite) that can produce intelligible
+      Hindi, so the test file was formant tones. Whisper HALLUCINATED
+      "Thanks for watching!" on it — its known failure on unintelligible audio.
+      Worth knowing: all four chunks were marked `[?]`, so the low-confidence
+      marker caught the hallucination. STT quality on real Hindi speech remains
+      entirely unverified.
 
 ## Phase 6 — UI + packaging
 - [ ] Root `install.sh` (TRD §6), idempotent
@@ -257,6 +279,16 @@ Could NOT verify here:
 - [ ] Full suite + lint
 - [ ] Checklist A1–A8 with PASS / UNVERIFIED and evidence
 - [ ] List of what couldn't be verified (desktop machine, etc.)
+
+## Backlog raised during Phase 5
+- **Whisper hallucinates confident boilerplate on unintelligible audio**
+  ("Thanks for watching!", "please subscribe"). Observed directly. The `[?]`
+  low-confidence marker caught it here, but a dedicated hallucination check
+  against that known phrase set would be stronger. Not implemented.
+- Script mode's two bugs both passed every unit test and were caught only by
+  running the command for real. The stub translator accepted any
+  `source_language` string; the real one rejects `auto`. Lesson recorded:
+  provider-contract bugs need an integration test with the real provider.
 
 ## Backlog raised during Phase 2
 - README must document the two manual steps for ptt_hold: `pip install evdev`
@@ -315,3 +347,8 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
   0.017 ms worst case against a 200 ms budget; AI-speaking indicator made
   undismissable after finding `vaani hide` could conceal an active takeover.
   Suite 526 green, ruff clean.
+- 2026-09-23 Phase 5 complete except Kanak's own recording. Two real bugs found
+  by end-to-end runs that every unit test had passed: source_language="auto"
+  (rejected by real NLLB, every chunk failed) and a chunker that produced 147
+  chunks from 13 s of audio because the quiet-point search could reach back to
+  start+20 ms. Both fixed with regression tests. Suite 578 green, ruff clean.
