@@ -63,13 +63,41 @@ Could NOT verify here:
 - [ ] Kanak confirms the proposed defaults (PRD V-7 thresholds, TRD O1–O3, hotkeys)
 
 ## Phase 1 — Core pipeline hardening
-- [ ] Install ruff in the venv (missing), then fix F821 in ui/app.py; ruff clean on touched files
-- [ ] `core/supervisor.py`: stage timeout/exception/OOM wrapper + tests
-- [ ] Bounded queues + drop-oldest counters in session/engine.py + tests
-- [ ] Worker thread supervision (restart stage; 3 crashes/60 s → fallback)
-- [ ] Rotating log file
-- [ ] Soak test: RSS sampling + pass rule (≤ +10 % from 5→30 min); fake-provider run here
-- [~] verify_phase1.sh: real 30-min soak on the laptop (Kanak runs)
+- [x] ruff installed; F821 in ui/app.py fixed (deferred lambda lost `exc` after the
+      except block → NameError swallowed the voice-test error). Bug class swept:
+      B023 clean, other 8 deferred lambdas safe. Lint gate added to pyproject
+      (select F/E9/B), green across src, tests and scripts.
+- [x] `core/supervisor.py`: exception + OOM containment, sliding CrashWindow,
+      latched degraded mode. 23 tests, injected clock. **Scope correction:** hard
+      stage *timeouts* are NOT implemented and cannot be in-process — Whisper and
+      XTTS sit in native calls CPython cannot preempt. run() reports duration for
+      post-hoc budget checks; real preemption needs a subprocess (see backlog).
+- [x] Bounded queues + drop counters in session/engine.py + 17 tests.
+      `_out_queue` was unbounded; now bounded drop-oldest with a counter.
+- [x] Worker thread supervision. **Scope correction:** pipeline.process() already
+      caught stage exceptions, so the real gap was the five steps AFTER it (db
+      write, audio injection, latency record, result callback, state transition)
+      which ran bare and killed the worker thread → session alive but deaf.
+      All five now run inside the supervisor. 3 crashes/60 s → degraded mode.
+- [x] **Memory leak found and fixed:** `session.results` was an unbounded list and
+      every UtteranceResult holds its synthesised audio. Now a bounded deque
+      (default 200) + lifetime counters. Also made latency_percentiles() genuinely
+      rolling, which AC-13.2 specified and the unbounded list never satisfied.
+      Consumers updated: cli.py counters, and meeting_takeover_app's index slicing
+      replaced with eviction-safe `new_results_since(seq)`.
+- [x] Rotating log file. **It existed but was dead code** — setup_logging() was
+      never called from anywhere, and the codebase had exactly ONE logging call.
+      Now wired into cli.main() behind a global --log-level, with session
+      start/stop counters and stage-failure tracebacks. Verified: structured JSON
+      lands in ~/.local/share/vaani/logs/vaani.log.
+- [x] Soak harness: `scripts/soak_test.py` (RSS sampling, median-window pass rule,
+      per-sample checkpointing because the desktop crashes under sustained load).
+      **Measured here:** 360 utterances, RSS flat 49.9 → 49.5 MiB, **-0.88%**
+      growth, report in release/soak_capped.json. The same harness before the cap
+      showed linear growth of ~0.36 MiB per utterance — that was the leak.
+- [~] verify_phase1.sh: real 30-min soak with REAL providers on the laptop
+      (Kanak runs). The run above used stub providers on purpose: it proves the
+      session machinery does not leak, not that Whisper/XTTS do not.
 
 ## Phase 2 — Meeting mode
 - [ ] `session/input_mode.py` (always_on / ptt_toggle / ptt_hold / bypass) + tests
@@ -118,6 +146,17 @@ Could NOT verify here:
 - [ ] Checklist A1–A8 with PASS / UNVERIFIED and evidence
 - [ ] List of what couldn't be verified (desktop machine, etc.)
 
+## Backlog raised during Phase 1
+- Hard stage timeouts need a subprocess worker; in-process preemption of a native
+  Whisper/XTTS call is not possible. Revisit if a hang is ever observed in practice.
+- `ai/assist.py:123` still hardcodes `qwen3-coder:latest`, which is NOT installed
+  on this machine. Phase 3.
+- Style lint families (E4/E7, I, UP, SIM) are ~385 findings, concentrated in the
+  out-of-v1-scope Windows console. Not gated; not pretended to be clean.
+- `tests/unit/test_ui.py` intermittently emits a tkinter `Variable.__del__`
+  teardown warning ("main thread is not in main loop"). GC-timing artifact, not a
+  failure; appears in some runs only.
+
 ## Comment backlog (rule 4)
 Existing files not yet brought to the rule-4 comment standard: all of `src/vaani/**`
 (to be ticked off as each is touched).
@@ -128,3 +167,9 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
   (it had never reached the repo) into branch `v1-complete`, then committed
   ~1430 lines of Phase 3/4 work that was sitting uncommitted and unlost.
   Suite green at 318. Phase 0 still blocked on Kanak confirming defaults.
+- 2026-09-22 Phase 1 complete on the Victus. Found and fixed a real memory leak
+  (unbounded results list) and a real crash path (unguarded post-pipeline steps),
+  plus the F821 NameError. Rotating logs were dead code; now wired. Soak measured
+  at -0.88% RSS growth over 360 utterances. Suite 372 green, ruff clean.
+  NOT done: hard stage timeouts (impossible in-process, see Phase 1 notes) and the
+  real-provider 30-min soak, which needs Kanak's hardware and voice.

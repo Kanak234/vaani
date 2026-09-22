@@ -17,6 +17,7 @@ def _get_user_id() -> str:
     return str(os.getuid())
 
 from .core.errors import ErrorCode, Severity, VaaniError
+from .system.logging import setup_logging
 from .core.types import PerformanceMode
 
 
@@ -1288,6 +1289,12 @@ def cmd_gui(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="vaani",
                                  description="Real-time personal voice translation")
+    # Global, so every subcommand inherits it. DEBUG is what to ask a user for
+    # after a mid-meeting failure; the file handler rotates at 5 MiB x 3, so
+    # leaving it on does not fill the disk.
+    ap.add_argument("--log-level", default="INFO",
+                    choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    help="file and console log verbosity (default: INFO)")
     sub = ap.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("transcribe",
@@ -1445,6 +1452,22 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_run)
 
     args = ap.parse_args(argv)
+
+    # WHY HERE: system/logging.py has had a RotatingFileHandler (5 MiB x 3)
+    # since before v1.0, but setup_logging() was never called from anywhere -
+    # so the rotating log was dead code and a 30-minute session left no
+    # diagnosable trace behind. This is the one place every subcommand passes
+    # through, and it runs AFTER parse_args so that `--help` and usage errors
+    # stay instant and do not touch the filesystem.
+    # WHERE THE DATA FLOWS NEXT: ~/.local/share/vaani/logs/vaani.log, which is
+    # what a user should attach when reporting a mid-meeting failure.
+    try:
+        setup_logging(level=getattr(args, "log_level", "INFO"))
+    except Exception as exc:        # noqa: BLE001
+        # Logging must never be the reason Vaani refuses to start: a
+        # read-only or full home directory is annoying, not fatal.
+        print(f"warning: could not open the log file ({exc}); "
+              f"continuing without file logging", file=sys.stderr)
 
     # E-1, enforced at parse time so the failure arrives instantly rather than
     # after 30 s of model loading. `ap.error` exits 2, which is the conventional

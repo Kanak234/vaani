@@ -44,10 +44,17 @@ from ..core.latency_monitor import LatencyMonitor
 from ..core.pipeline import PipelineConfig, TranslationPipeline
 from ..core.state_machine import SessionState, SessionStateMachine
 from ..core.supervisor import StageSupervisor
+from ..system.logging import get_logger
 from ..core.types import PerformanceMode, Utterance, UtteranceResult
 
 SAMPLE_RATE = 16000
 FRAME_MS = 20
+
+# WHY a module logger: after a meeting goes wrong the user has only the
+# log file to hand back. Until now the rotating handler existed but
+# nothing in the session ever wrote to it, so a failed 30-minute run
+# left no trace at all. These are the events worth reconstructing.
+_log = get_logger("session")
 
 
 @dataclass(slots=True)
@@ -218,6 +225,11 @@ class TranslationSession:
     # ----------------------------------------------------------- lifecycle
 
     def start(self) -> None:
+        # The session id ties every later line in the log to this run, which
+        # matters when a user has several meetings in one rotated file.
+        _log.info("session %s starting (mode=%s, virtual_mic=%s)",
+                  self.id, self.config.performance_mode.value,
+                  self.config.use_virtual_mic)
         self.sm.transition(SessionState.INITIALIZING)
         try:
             self._open_devices()
@@ -297,6 +309,14 @@ class TranslationSession:
             self._virtual_mic = None
 
     def stop(self, *, timeout: float = 5.0) -> None:
+        # The end-of-session counters are the first thing to look at when the
+        # user says "it went quiet halfway through": dropped means too slow,
+        # failed means something threw, underruns means the audio device.
+        _log.info("session %s stopping: %d utterances, %d suppressed, "
+                  "%d dropped, %d failed, %d underruns, %d audio blocks dropped",
+                  self.id, self.total_utterances, self.total_suppressed,
+                  self.dropped_utterances, self.failed_utterances,
+                  self.underruns, self.dropped_audio_blocks)
         if self.sm.state is not SessionState.IDLE:
             try:
                 self.sm.transition(SessionState.STOPPING)
@@ -463,6 +483,9 @@ class TranslationSession:
     def _report_stage_failure(self, stage: str, exc: BaseException) -> None:
         """One contained failure. Routed to the same callback the latency
         warnings use, so the overlay needs no new plumbing."""
+        # exc_info so the traceback lands in the log; the user only sees the
+        # one-line banner, but the file keeps what is needed to diagnose it.
+        _log.warning("stage %s failed: %s", stage, exc, exc_info=exc)
         if self._on_latency_warning is None:
             return
         try:
@@ -473,6 +496,9 @@ class TranslationSession:
 
     def _report_degraded(self, stage: str) -> None:
         """The crash window tripped: the stage is broken now, not unlucky."""
+        _log.error("stage %s failed %d times in %.0fs - entering degraded mode",
+                   stage, self.config.stage_crash_limit,
+                   self.config.stage_crash_window_s)
         if self._on_latency_warning is None:
             return
         try:

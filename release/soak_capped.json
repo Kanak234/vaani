@@ -1,0 +1,168 @@
+{
+  "started_utc": "2026-09-22T13:17:35Z",
+  "config": {
+    "minutes": 3.0,
+    "utterance_every_s": 0.5,
+    "utterance_seconds": 3.0,
+    "sample_every_s": 10.0,
+    "settle_s": 40.0,
+    "max_growth_pct": 10.0,
+    "max_retained_results": 20,
+    "out": "/tmp/claude-1000/-home-kanak-Desktop-New-Folder/5d77f048-c0ba-4222-bdf2-a7b0cfdf0de2/scratchpad/soak_capped.json"
+  },
+  "samples": [
+    {
+      "t_s": 0.0,
+      "rss_mib": 41.87,
+      "utterances": 1,
+      "retained": 1,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 10.0,
+      "rss_mib": 49.41,
+      "utterances": 21,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 20.0,
+      "rss_mib": 49.57,
+      "utterances": 41,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 30.0,
+      "rss_mib": 49.74,
+      "utterances": 61,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 40.0,
+      "rss_mib": 49.74,
+      "utterances": 81,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 50.0,
+      "rss_mib": 49.91,
+      "utterances": 101,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 60.0,
+      "rss_mib": 49.91,
+      "utterances": 121,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 70.0,
+      "rss_mib": 49.48,
+      "utterances": 141,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 80.0,
+      "rss_mib": 49.48,
+      "utterances": 161,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 90.0,
+      "rss_mib": 49.48,
+      "utterances": 181,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 100.0,
+      "rss_mib": 49.84,
+      "utterances": 201,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 110.0,
+      "rss_mib": 49.47,
+      "utterances": 221,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 120.0,
+      "rss_mib": 49.47,
+      "utterances": 241,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 130.0,
+      "rss_mib": 49.47,
+      "utterances": 261,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 140.0,
+      "rss_mib": 49.47,
+      "utterances": 281,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 150.0,
+      "rss_mib": 49.47,
+      "utterances": 301,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 160.0,
+      "rss_mib": 49.47,
+      "utterances": 321,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    },
+    {
+      "t_s": 170.0,
+      "rss_mib": 49.47,
+      "utterances": 341,
+      "retained": 20,
+      "failed": 0,
+      "dropped_audio_blocks": 0
+    }
+  ],
+  "status": "pass",
+  "baseline_rss_mib": 49.91,
+  "final_rss_mib": 49.47,
+  "growth_pct": -0.88,
+  "peak_rss_mib": 49.91,
+  "window_samples": 3,
+  "total_utterances": 360,
+  "failed_utterances": 0,
+  "retained_results": 20
+}
