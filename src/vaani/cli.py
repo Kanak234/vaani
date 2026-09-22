@@ -1009,6 +1009,32 @@ def cmd_meeting(args) -> int:
         except (ValueError, OSError):
             pass
 
+    # Physical hold-to-talk, only when the user asked for it. WHY it is wired
+    # here rather than inside the session: it needs the CLI's ability to PRINT
+    # why it could not start. A meeting must never fail to start because a
+    # convenience feature is unavailable, so an unavailable listener degrades
+    # to ptt_toggle (driven by `vaani talk`) with the reason on screen.
+    ptt_listener = None
+    if session.input_mode.mode is InputMode.PTT_HOLD:
+        from .system.evdev_ptt import PttListener
+        ptt_listener = PttListener(
+            key=args.ptt_key,
+            on_press=session.press_talk,
+            on_release=session.release_talk)
+        result = ptt_listener.start()
+        if result.ok:
+            print(f"  push-to-talk: {result.reason}")
+        else:
+            print(f"  push-to-talk: {result.reason}", file=sys.stderr)
+            if result.remedy:
+                print(f"                try: {result.remedy}", file=sys.stderr)
+            print("                falling back to `vaani talk` (toggle).",
+                  file=sys.stderr)
+            ptt_listener = None
+            # Degrade explicitly rather than leaving the user in a mode whose
+            # key nothing is reading - that would look like a dead microphone.
+            session.set_input_mode(InputMode.PTT_TOGGLE)
+
     control = ControlServer(handle)
     try:
         control.start()
@@ -1089,6 +1115,10 @@ def cmd_meeting(args) -> int:
             remote_listener.stop()
         if takeover_rt is not None:
             takeover_rt.stop()
+        if ptt_listener is not None:
+            # Stopped before the session so its callbacks cannot fire into a
+            # half-torn-down session.
+            ptt_listener.stop()
         if router is not None:
             # Put meeting apps back on a real microphone. Leaving them on a dead
             # virtual mic would make the user silent in their next call.
@@ -1372,6 +1402,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--input-mode", default=InputMode.ALWAYS_ON.value,
                    choices=[m.value for m in InputMode],
                    help="always_on (default), ptt_toggle, or ptt_hold")
+    p.add_argument("--ptt-key", default="KEY_F8",
+                   help="key to hold in ptt_hold mode (default: KEY_F8). "
+                        "Needs the 'evdev' package and membership of the "
+                        "'input' group; see README.")
     # D-3 FIX: default None = auto-detect (F-22). The old default was
     # `qwen3-coder:latest`, which is (a) not installed on this machine and (b)
     # the build this repo MEASURED getting dates wrong. Pass a name to pin one.

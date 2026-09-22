@@ -121,10 +121,24 @@ Could NOT verify here:
       in 4 s, and 2 Microsoft Edge streams were restored to the real microphone.
       Create/reuse/destroy separately verified: second create reused rather than
       stacking, 0 modules left behind.
-- [ ] `system/evdev_ptt.py` optional hold-to-talk (NOT STARTED). ptt_hold is
-      selectable and gates audio correctly, but nothing yet reads the physical
-      key — it must currently be driven via `vaani talk` / the control socket.
-- [~] verify_phase2.sh + manual Meet check (Kanak)
+- [x] `system/evdev_ptt.py` optional hold-to-talk. 17 tests against fake events,
+      so the press/release/autorepeat rules are covered without evdev, without
+      /dev/input and without root. Wired into `vaani meeting --input-mode
+      ptt_hold --ptt-key KEY_F8`.
+      **Cannot be exercised on this machine:** `evdev` is not installed AND the
+      user is not in the `input` group (a privileged `usermod` + re-login).
+      What IS verified live: the degradation path names the missing prerequisite,
+      prints the remedy, and falls back to ptt_toggle rather than leaving the
+      user in a mode whose key nothing reads.
+      Privacy note in the module: reading /dev/input means seeing every keystroke
+      on the machine, so it matches one key and never stores or logs a key code.
+- [x] **Live end-to-end verification on real hardware** (not a unit test):
+      MUTED → `vaani talk` → LIVE → `vaani bypass-on` → BYPASS, each confirmed
+      via `vaani status` and the session log; SIGTERM left 0 PipeWire modules and
+      restored 2 Microsoft Edge streams to the real mic.
+- [~] verify_phase2.sh + manual Meet call with a human on the other end (Kanak).
+      Edge was already consuming the virtual mic during testing, which is
+      encouraging but is NOT the same as a real Meet call being understood.
 
 ## Phase 3 — Auto model detection
 - [ ] CUDA "really works" probe + VAANI_FORCE_CPU
@@ -165,6 +179,8 @@ Could NOT verify here:
 - [ ] List of what couldn't be verified (desktop machine, etc.)
 
 ## Backlog raised during Phase 2
+- README must document the two manual steps for ptt_hold: `pip install evdev`
+  and `sudo usermod -aG input $USER` + re-login. Phase 6.
 - **First run is silent for minutes.** `vaani meeting` prints "Starting Vaani in
   meeting mode..." then downloads the Whisper model (~1.5 GB for `medium`) with no
   progress reaching the terminal. It was mistaken for a hang during testing —
@@ -205,3 +221,6 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
   end; verified against a live meeting session on real PipeWire, including SIGTERM
   cleanup and app restoration. Suite 417 green, ruff clean. Outstanding: evdev
   hold-to-talk, and the manual Meet call which needs Kanak.
+- 2026-09-22 Phase 2 COMPLETE. evdev hold-to-talk implemented and tested against
+  fake events; its degradation path verified live because the real path needs a
+  privileged group change. Suite 434 green, ruff clean.
