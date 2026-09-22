@@ -155,7 +155,7 @@ def main() -> int:
     print(f"{'PIPELINE TOTAL':<22}{total_p50:>12.1f}")
     print(f"{'MEASURED END-TO-END':<22}{p50:>12.1f}{p95:>12.1f}{max(e2e):>12.1f}")
     print()
-    print(f"  + capture latency          22.3 ms  (measured separately)")
+    print("  + capture latency          22.3 ms  (measured separately)")
     print(f"  + VAD hangover        {seg_cfg.hangover_ms:>9} ms  (fixed cost before "
           f"the utterance even closes)")
     user_p50 = p50 + 22.3 + seg_cfg.hangover_ms

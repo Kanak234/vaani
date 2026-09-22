@@ -19,7 +19,6 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-import numpy as np
 
 sys.path.insert(0, "src")
 
@@ -31,7 +30,7 @@ from vaani.ai.vad.silero import SileroVad                     # noqa: E402
 from vaani.audio.backend.pulse_backend import PulseCaptureStream  # noqa: E402
 from vaani.audio.segmenter import SegmenterConfig, UtteranceSegmenter  # noqa: E402
 from vaani.core.gate import ConfidenceGate, GateConfig        # noqa: E402
-from vaani.core.types import PerformanceMode, Transcript      # noqa: E402
+from vaani.core.types import PerformanceMode      # noqa: E402
 
 SR, FRAME_MS = 16000, 20
 FRAME_N = SR * FRAME_MS // 1000

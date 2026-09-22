@@ -52,7 +52,7 @@ class MeetingTakeoverApp:
         self._remote = None
         self._thread = None
         self._monitor_thread = None
-        self._last_result_count = 0
+        self._last_result_seq = 0
         self.output_device = output_device
 
         recognizer = FasterWhisperRecognizer(
@@ -152,16 +152,21 @@ class MeetingTakeoverApp:
 
     def _user_signal_loop(self) -> None:
         while not self.stop_event.is_set():
-            results = self.session.results
-            if self._last_result_count < len(results):
-                for result in results[self._last_result_count:]:
-                    if result.transcript is not None:
-                        text = result.transcript.text
-                        self.runtime.observe_user_speech(
-                            text, hesitation=looks_hesitant(text))
-                        if any(p in text.lower() for p in self.runtime.controller.config.explicit_phrases):
-                            self._emit_response(self.runtime.respond_if_authorized())
-                self._last_result_count = len(results)
+            # WHY a sequence number instead of a list index: session.results is
+            # a bounded rolling window now, so once it starts evicting, index N
+            # stops meaning "the Nth utterance" and this loop would silently
+            # re-read old results or skip new ones. new_results_since() is
+            # eviction-safe. WHERE THE DATA FLOWS NEXT: each transcript feeds
+            # the takeover runtime, which decides whether to speak for the user.
+            new_results, self._last_result_seq = \
+                self.session.new_results_since(self._last_result_seq)
+            for result in new_results:
+                if result.transcript is not None:
+                    text = result.transcript.text
+                    self.runtime.observe_user_speech(
+                        text, hesitation=looks_hesitant(text))
+                    if any(p in text.lower() for p in self.runtime.controller.config.explicit_phrases):
+                        self._emit_response(self.runtime.respond_if_authorized())
             self._emit_response(self.runtime.respond_if_authorized())
             time.sleep(0.1)
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import queue
 import threading
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -42,6 +43,7 @@ from ..core.gate import ConfidenceGate, GateConfig
 from ..core.latency_monitor import LatencyMonitor
 from ..core.pipeline import PipelineConfig, TranslationPipeline
 from ..core.state_machine import SessionState, SessionStateMachine
+from ..core.supervisor import StageSupervisor
 from ..core.types import PerformanceMode, Utterance, UtteranceResult
 
 SAMPLE_RATE = 16000
@@ -64,6 +66,19 @@ class SessionConfig:
     persist_transcript: bool = False
     #: None disables persistence entirely (no database file is touched).
     database: object | None = None
+    #: How many finished results stay in memory. WHY BOUNDED: every
+    #: UtteranceResult holds its synthesised audio, so an unbounded list grew
+    #: by megabytes per utterance and was the single largest memory leak in a
+    #: long meeting. Nothing needs the full history -- consumers want counts
+    #: (now kept as counters) and a rolling latency window, which AC-13.2 says
+    #: should be rolling anyway.
+    max_retained_results: int = 200
+    #: Audio blocks waiting on the output thread. At ~1 utterance per block
+    #: this is minutes of speech: only a genuinely stuck output thread fills it.
+    max_queued_audio_blocks: int = 256
+    #: A stage failing this many times inside the window drops to fallback.
+    stage_crash_limit: int = 3
+    stage_crash_window_s: float = 60.0
     gate: GateConfig = field(default_factory=GateConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
@@ -98,7 +113,8 @@ class TranslationSession:
         self._on_result = on_result
         self._queue: queue.Queue[Utterance | None] = queue.Queue(
             maxsize=self.config.max_queued_utterances)
-        self._out_queue: queue.Queue[np.ndarray | None] = queue.Queue()
+        self._out_queue: queue.Queue[np.ndarray | None] = queue.Queue(
+            maxsize=self.config.max_queued_audio_blocks)
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._muted = threading.Event()
@@ -112,9 +128,40 @@ class TranslationSession:
         self._seq = 0
         self._db = self.config.database
         self._db_session_id: int | None = None
-        self.results: list[UtteranceResult] = []
+        # Bounded on purpose - see SessionConfig.max_retained_results. A deque
+        # with maxlen evicts the oldest entry automatically, so the memory
+        # ceiling is fixed no matter how long the meeting runs.
+        # WHERE IT GOES NEXT: latency_percentiles() reads it for the rolling
+        # p50/p95, and new_results_since() feeds the takeover app.
+        self.results: deque[UtteranceResult] = deque(
+            maxlen=self.config.max_retained_results)
+        #: Shed by backpressure: the worker was busy and the queue was full.
         self.dropped_utterances = 0
+        #: Attempted but raised. See _worker_loop for why these are separate.
+        self.failed_utterances = 0
         self.underruns = 0
+        # Lifetime totals. These must NOT be derived from len(self.results) any
+        # more: that list is now a window, so len() would silently stop
+        # counting once a meeting passed max_retained_results utterances and
+        # the end-of-session report would understate the session.
+        self.total_utterances = 0
+        self.total_suppressed = 0
+        #: Monotonic sequence number, incremented once per finished result.
+        #: Consumers track "what have I already seen" with this instead of a
+        #: list index, which breaks as soon as the window starts evicting.
+        self.results_seq = 0
+        #: Audio blocks discarded because the output thread fell too far behind.
+        self.dropped_audio_blocks = 0
+        # Contains a crash in the worker loop so one bad utterance cannot end
+        # the session. WHERE IT GOES NEXT: on_stage_failure/on_degraded are
+        # surfaced by cli.py to the overlay banner.
+        self.supervisor = StageSupervisor(
+            "pipeline",
+            limit=self.config.stage_crash_limit,
+            window_s=self.config.stage_crash_window_s,
+            on_failure=self._report_stage_failure,
+            on_exhausted=self._report_degraded,
+        )
 
     def _enqueue_chunk(self, chunk) -> None:
         """Play a streamed chunk immediately.
@@ -124,12 +171,49 @@ class TranslationSession:
         instead of letting them play out.
         """
         if self.sm.can_emit_audio and not self._stop.is_set():
-            self._out_queue.put(chunk)
+            self._put_audio(chunk)
 
     def inject_audio(self, samples: np.ndarray) -> None:
         """Public API for injecting synthetic audio (like takeover answers)."""
         if self.sm.can_emit_audio and not self._stop.is_set():
-            self._out_queue.put(samples)
+            self._put_audio(samples)
+
+    def _put_audio(self, block: np.ndarray) -> None:
+        """Queue audio for the output thread, dropping the OLDEST block if full.
+
+        WHY BOUNDED AT ALL: this queue was unbounded. The output thread drains
+        it at real time, but a synthesiser can produce faster than real time,
+        so a long meeting could accumulate audio faster than it was spoken and
+        grow without limit -- a leak that only shows up in exactly the 30+
+        minute session Phase 1 has to survive.
+
+        WHY DROP THE OLDEST: by the time this queue is minutes deep the
+        conversation has moved on, and the same reasoning the module docstring
+        applies to late utterances applies here -- speaking a stale sentence
+        into a live meeting is worse than saying nothing. Dropping the newest
+        instead would pin the user permanently behind.
+
+        The honest cost: a drop can cut an utterance mid-word. That is why the
+        bound is generous (minutes, not seconds) and why every drop is counted
+        rather than hidden -- dropped_audio_blocks being non-zero means the
+        machine could not keep up, and the user is told.
+        """
+        try:
+            self._out_queue.put_nowait(block)
+            return
+        except queue.Full:
+            pass
+        try:
+            self._out_queue.get_nowait()        # evict the stalest block
+            self.dropped_audio_blocks += 1
+        except queue.Empty:                     # drained by the output thread
+            pass
+        try:
+            self._out_queue.put_nowait(block)
+        except queue.Full:
+            # Still full: the output thread is wedged, not merely slow. Count
+            # it and move on rather than blocking the worker behind it.
+            self.dropped_audio_blocks += 1
 
     # ----------------------------------------------------------- lifecycle
 
@@ -310,40 +394,113 @@ class TranslationSession:
             if utterance is None:
                 return
 
-            result = self.pipeline.process(utterance)
-            self.results.append(result)
-
-            if self._db is not None and self._db_session_id is not None:
-                try:
-                    self._db.record_utterance(self._db_session_id, result)
-                except Exception:
-                    pass    # a storage failure must not drop the utterance
-
-            # With a streaming synthesiser the chunks were already queued as they
-            # were produced; queueing the assembled audio again would play the
-            # whole utterance twice.
-            already_streamed = any(t.stage == "tts_first_chunk"
-                                   for t in result.timings)
-            if (result.audio is not None and not result.suppressed
-                    and not already_streamed):
-                # The invariant, checked at the last possible moment: an emergency
-                # stop between synthesis and playback must still win.
-                if self.sm.can_emit_audio:
-                    self.inject_audio(result.audio.samples)
-            warning = self.latency_monitor.record(result)
-            if warning is not None and self._on_latency_warning:
-                try:
-                    self._on_latency_warning(warning)
-                except Exception:
-                    pass
-
-            if self._on_result:
-                try:
-                    self._on_result(result)
-                except Exception:
-                    pass
+            # THE containment boundary. Everything below used to run bare: an
+            # exception from the pipeline, or from any of the five follow-up
+            # steps, killed this thread. Capture kept running and the virtual
+            # mic kept emitting silence, so the session looked alive while
+            # being permanently deaf -- the worst possible failure in a
+            # meeting. Now one bad utterance costs one utterance.
+            attempt = self.supervisor.run(self._process_one, utterance)
+            if not attempt.ok:
+                # Counted SEPARATELY from dropped_utterances on purpose. That
+                # counter means "the worker was too slow and we shed load"; this
+                # one means "the worker tried and something threw". Merging them
+                # would make the end-of-session report unable to distinguish a
+                # machine that is too slow from a stage that is broken.
+                self.failed_utterances += 1
             if self.sm.can_transition(SessionState.LISTENING):
                 self.sm.transition(SessionState.LISTENING)
+
+    def _process_one(self, utterance: Utterance) -> None:
+        """One utterance, end to end. Runs INSIDE the supervisor.
+
+        Split out of _worker_loop so that the supervisor wraps the whole
+        sequence -- pipeline, persistence, playback, telemetry, callbacks --
+        and not just the pipeline call. A crash in any of them is contained
+        identically. WHERE THE DATA FLOWS NEXT: audio to _out_queue and the
+        virtual mic; the result to the on_result callback (overlay/CLI).
+        """
+        result = self.pipeline.process(utterance)
+        self.results.append(result)
+        # Counters advance for every utterance, including evicted ones.
+        self.total_utterances += 1
+        self.results_seq += 1
+        if result.suppressed:
+            self.total_suppressed += 1
+
+        if self._db is not None and self._db_session_id is not None:
+            try:
+                self._db.record_utterance(self._db_session_id, result)
+            except Exception:
+                pass    # a storage failure must not drop the utterance
+
+        # With a streaming synthesiser the chunks were already queued as they
+        # were produced; queueing the assembled audio again would play the
+        # whole utterance twice.
+        already_streamed = any(t.stage == "tts_first_chunk"
+                               for t in result.timings)
+        if (result.audio is not None and not result.suppressed
+                and not already_streamed):
+            # The invariant, checked at the last possible moment: an emergency
+            # stop between synthesis and playback must still win.
+            if self.sm.can_emit_audio:
+                self.inject_audio(result.audio.samples)
+        warning = self.latency_monitor.record(result)
+        if warning is not None and self._on_latency_warning:
+            try:
+                self._on_latency_warning(warning)
+            except Exception:
+                pass
+
+        if self._on_result:
+            try:
+                self._on_result(result)
+            except Exception:
+                pass
+
+    # ------------------------------------------------- degradation reporting
+
+    def _report_stage_failure(self, stage: str, exc: BaseException) -> None:
+        """One contained failure. Routed to the same callback the latency
+        warnings use, so the overlay needs no new plumbing."""
+        if self._on_latency_warning is None:
+            return
+        try:
+            self._on_latency_warning(
+                f"{stage} failed ({type(exc).__name__}); utterance dropped")
+        except Exception:
+            pass
+
+    def _report_degraded(self, stage: str) -> None:
+        """The crash window tripped: the stage is broken now, not unlucky."""
+        if self._on_latency_warning is None:
+            return
+        try:
+            self._on_latency_warning(
+                f"{stage} failed {self.config.stage_crash_limit}x in "
+                f"{self.config.stage_crash_window_s:.0f}s - degraded mode")
+        except Exception:
+            pass
+
+    def new_results_since(self, seq: int) -> tuple[list[UtteranceResult], int]:
+        """Results finished since sequence ``seq``, plus the new sequence.
+
+        WHY THIS EXISTS: consumers used to slice ``session.results`` by index.
+        That was already fragile and became wrong once the list turned into a
+        bounded window -- after eviction, index N is no longer the Nth
+        utterance, so a consumer would silently re-read or skip results.
+        Sequence numbers survive eviction.
+
+        If the caller has fallen further behind than the retained window, it
+        gets what is still there; the gap is visible as the jump in the
+        returned sequence rather than being papered over.
+        """
+        pending = self.results_seq - seq
+        if pending <= 0:
+            return [], self.results_seq
+        items = list(self.results)[-pending:] if pending <= len(self.results) \
+            else list(self.results)
+        return items, self.results_seq
 
     def _output_loop(self) -> None:
         """Keep the virtual microphone continuously fed.

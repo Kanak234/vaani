@@ -423,9 +423,13 @@ def cmd_run(args) -> int:
 
     stats = session.latency_percentiles()
     print("\n" + "=" * 72)
-    print(f"Utterances: {len(session.results)}   "
-          f"suppressed: {sum(1 for r in session.results if r.suppressed)}   "
-          f"dropped: {session.dropped_utterances}")
+    # Lifetime counters, not len(session.results): that is now a bounded
+    # rolling window, so counting it would understate any meeting longer than
+    # max_retained_results utterances.
+    print(f"Utterances: {session.total_utterances}   "
+          f"suppressed: {session.total_suppressed}   "
+          f"dropped: {session.dropped_utterances}   "
+          f"failed: {session.failed_utterances}")
     if stats:
         print(f"End-to-end latency (measured): p50 {stats['p50']}ms  "
               f"p95 {stats['p95']}ms  min {stats['min']}ms  max {stats['max']}ms")
@@ -919,7 +923,7 @@ def cmd_meeting(args) -> int:
             # Surfaced in `vaani status` so the user can check from a terminal
             # whether Vaani is currently authorised to speak for them.
             return {"state": session.sm.state.value, "visible": overlay.visible,
-                    "utterances": len(session.results),
+                    "utterances": session.total_utterances,
                     "p50_ms": stats.get("p50") if stats else None,
                     "takeover": takeover_rt.controller.state.value,
                     "remote_heard": (remote_listener.utterances_heard
@@ -927,7 +931,7 @@ def cmd_meeting(args) -> int:
                     "remote_questions": (remote_listener.questions_seen
                                          if remote_listener else 0)}
         return {"state": session.sm.state.value, "visible": overlay.visible,
-                "utterances": len(session.results),
+                "utterances": session.total_utterances,
                 "p50_ms": stats.get("p50") if stats else None}
 
     import signal
