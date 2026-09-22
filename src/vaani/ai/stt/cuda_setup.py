@@ -138,6 +138,16 @@ def cuda_available() -> tuple[bool, str]:
     Model construction is deliberately NOT used as the test: it succeeds even when
     cuBLAS is missing. Only a real encode proves the path works.
     """
+    # WHY AN ENV OVERRIDE: the acceptance criteria require that CPU fallback
+    # works when CUDA is missing, but CUDA works on the development laptop, so
+    # that path was UNVERIFIABLE without uninstalling the driver. This makes
+    # the untested branch reachable on a working machine:
+    #     VAANI_FORCE_CPU=1 vaani meeting
+    # It is also the honest answer when the GPU is being used by something else
+    # (a game, a training run) and the user wants Vaani off it.
+    if os.environ.get("VAANI_FORCE_CPU", "").strip().lower() not in ("", "0", "false", "no"):
+        return False, "forced to CPU by VAANI_FORCE_CPU"
+
     ensure_cuda_libraries()
     try:
         import ctranslate2

@@ -35,6 +35,71 @@ def cmd_devices(args) -> int:
     return 0
 
 
+def cmd_models(args) -> int:
+    """Show what Vaani would choose for each stage, and WHY.
+
+    WHY THIS COMMAND EXISTS: auto-detection is only trustworthy if the user can
+    see its reasoning. "Vaani picked a model" is not checkable; "picked
+    phi4-mini because coder builds were measured dropping dates" is. This is
+    also the fastest way to answer the two questions that actually come up --
+    "is it using my GPU?" and "why is it slow?" -- without starting a meeting.
+
+    Read-only: it loads nothing and changes nothing unless --probe is passed.
+    """
+    from .ai.model_detect import (
+        is_discouraged, list_models, rank_models, resolve_llm_model,
+    )
+    from .ai.stt.cuda_setup import cuda_available
+    from .core.types import PerformanceMode
+
+    print("=" * 72)
+    print("VAANI MODEL SELECTION")
+    print("=" * 72)
+
+    # --- hardware -----------------------------------------------------------
+    gpu_ok, gpu_reason = cuda_available()
+    print(f"\nGPU        {'CUDA usable' if gpu_ok else 'CPU only'}  ({gpu_reason})")
+    if not gpu_ok and "VAANI_FORCE_CPU" not in gpu_reason:
+        print("           set VAANI_FORCE_CPU=1 to force this deliberately")
+    elif gpu_ok:
+        print("           VAANI_FORCE_CPU=1 forces CPU, to test the fallback path")
+
+    # --- speech recognition -------------------------------------------------
+    from .ai.stt.whisper import FasterWhisperRecognizer
+    print("\nSPEECH RECOGNITION (Whisper)")
+    for mode in PerformanceMode:
+        rec = FasterWhisperRecognizer.for_mode(mode)
+        cached = "cached" if rec.is_cached() else "NOT downloaded yet"
+        marker = " <- default" if mode is PerformanceMode.BALANCED else ""
+        print(f"  {mode.value:<12} {rec.model_size:<8} ({cached}){marker}")
+    if not gpu_ok:
+        print("  reason: stepped down from 'medium' because medium on CPU is")
+        print("          RTF ~0.6+, which would blow every latency budget")
+
+    # --- translation --------------------------------------------------------
+    print("\nTRANSLATION (local LLM via Ollama)")
+    installed = list_models()
+    if not installed:
+        print("  no Ollama models found. Translation falls back to NLLB alone,")
+        print("  which cannot use conversation context (see ADR-004).")
+        print("  Fix: ollama serve  &&  ollama pull phi4-mini")
+    else:
+        for index, name in enumerate(rank_models(installed)):
+            flag = "  DISCOURAGED (coder/embed build)" if is_discouraged(name) else ""
+            print(f"  {index + 1}. {name}{flag}")
+        choice = resolve_llm_model(pinned=args.model, probe=args.probe)
+        print(f"\n  chosen: {choice.describe()}")
+        if choice.rejected:
+            for name, why in choice.rejected.items():
+                print(f"  rejected {name}: {why}")
+        if not args.probe:
+            print("  (ranking only; pass --probe to actually run each candidate)")
+
+    print("\nRanking rationale: ai/model_detect.PREFERRED_MODELS - it is")
+    print("evidence-led, and every entry records what was measured.")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     from .diagnostics.checks import run_all
     print("=" * 72)
@@ -1506,6 +1571,14 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("devices", help="list audio devices")
     p.add_argument("--all", action="store_true", help="include monitor sources")
     p.set_defaults(func=cmd_devices)
+
+    p = sub.add_parser("models",
+                       help="show which models Vaani would use, and why")
+    p.add_argument("--probe", action="store_true",
+                   help="actually run each candidate (slow: loads each model)")
+    p.add_argument("--model", default=None,
+                   help="check a specific model instead of auto-detecting")
+    p.set_defaults(func=cmd_models)
 
     p = sub.add_parser("doctor", help="run diagnostics")
     p.set_defaults(func=cmd_doctor)

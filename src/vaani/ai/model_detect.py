@@ -147,6 +147,44 @@ def is_discouraged(model: str) -> bool:
     return rank_of(model) == _DISCOURAGED_RANK
 
 
+def is_derived(model: str) -> bool:
+    """True when this is a CUSTOM BUILD of a preferred model, not the model.
+
+    WHY THIS DISTINCTION EARNS ITS KEEP -- a real case on the dev machine:
+
+        rishi-phi4-mini-latest:latest
+
+    ranks as a phi4-mini (correctly -- substring matching exists for exactly
+    this), but `ollama show --system` reveals a baked-in Modelfile prompt:
+
+        "You are Rishi, a personal AI assistant ...
+         Reply in the same language he uses (English or Hindi)."
+
+    Vaani must ALWAYS emit English (AC-06.3). A model whose own system prompt
+    tells it to answer in Hindi will produce Devanagari that the gate then
+    suppresses -- so the user sees Vaani silently dropping utterances and
+    concludes it is broken, when it is obediently refusing to speak Hindi into
+    an English meeting. That build also carried temperature 0.6, against the
+    0.0 translation wants for determinism.
+
+    A derived model may well be fine. But the measured evidence in
+    PREFERRED_MODELS was gathered on the BASE model, so when both are
+    installed the base is the one the evidence actually covers. Hence: same
+    rank, base first.
+    """
+    name = base_name(model)
+    # Compare against the entry that actually DETERMINED the rank -- the first
+    # match, walking PREFERRED_MODELS in order, exactly as rank_of() does.
+    # Checking "any preferred entry" is wrong and was the first attempt here:
+    # "phi4-mini" contains the separate entry "phi4", so the base model
+    # flagged itself as a derived build of itself and the tie-break did
+    # nothing.
+    for preferred in PREFERRED_MODELS:
+        if preferred in name:
+            return preferred != name
+    return False
+
+
 def list_models(host: str = DEFAULT_HOST, *, timeout: float = 3.0) -> list[str]:
     """Names of every model Ollama has, or [] if Ollama is not reachable.
 
@@ -167,8 +205,17 @@ def list_models(host: str = DEFAULT_HOST, *, timeout: float = 3.0) -> list[str]:
 
 
 def rank_models(models: list[str]) -> list[str]:
-    """Best-first ordering. Stable within a rank, so `ollama list` order breaks ties."""
-    return sorted(models, key=lambda m: (rank_of(m), models.index(m)))
+    """Best-first ordering.
+
+    Sort key, in order:
+      1. rank_of()    -- measured quality band
+      2. is_derived() -- the exact model the evidence was gathered on beats a
+                         custom Modelfile build of it; see is_derived()
+      3. input order  -- stable, so `ollama list` order breaks remaining ties
+                         and the choice is reproducible between runs
+    """
+    return sorted(models,
+                  key=lambda m: (rank_of(m), is_derived(m), models.index(m)))
 
 
 def probe_model(model: str, host: str = DEFAULT_HOST, *,

@@ -50,6 +50,11 @@ from ..base import HealthState, TranslationEngine
 from .passthrough import normalize_for_speech
 
 _DEFAULT_HOST = "http://localhost:11434"
+#: The model auto-detection PREFERS, not a hardcoded default. The constructor
+#: defaults to model=None (auto-detect) because a fixed name hard-fails on any
+#: machine that does not happen to have it -- and Vaani targets two machines
+#: with different model sets. ai/model_detect.PREFERRED_MODELS is the real
+#: ordering; this constant remains only as the documented first preference.
 _DEFAULT_MODEL = "phi4-mini:latest"
 
 _LANGUAGE_NAMES = {"en": "English", "hi": "Hindi"}
@@ -91,7 +96,7 @@ class OllamaTranslator(TranslationEngine):
     #: Set to True automatically when a non-local host is configured.
     requires_network = False
 
-    def __init__(self, *, host: str = _DEFAULT_HOST, model: str | None = _DEFAULT_MODEL,
+    def __init__(self, *, host: str = _DEFAULT_HOST, model: str | None = None,
                  timeout_s: float = 30.0, max_context_turns: int = 6,
                  temperature: float = 0.0, num_predict: int = 200,
                  keep_alive: str = "0") -> None:
