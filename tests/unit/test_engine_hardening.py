@@ -395,7 +395,12 @@ def test_the_replacement_provider_gets_a_clean_allowance():
     s = TranslationSession(
         recognizer=StubRecognizer(), translator=StubTranslator(),
         synthesizer=FallbackSynthesizer(), vad=StubVad(),
-        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=3),
+        # Cooldown disabled: this test is about the WINDOW resetting so the
+        # replacement gets a clean allowance, not about how often degradation
+        # is announced. Rate limiting is covered separately by
+        # test_degraded_announcements_are_rate_limited.
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=3,
+                             stage_degrade_cooldown_s=0.0),
         on_stage_degraded=degraded.append)
 
     for _ in range(3):
@@ -480,3 +485,64 @@ def test_degrading_a_router_keeps_nllb_not_the_failed_llm():
     s.swap_translator(surviving, reason="LLM failed repeatedly")
 
     assert s.pipeline.translator.key == "nllb"
+
+
+def test_no_speech_recognised_is_not_a_provider_failure():
+    """REGRESSION from the 30-minute soak.
+
+    An idle microphone picks up room noise, the VAD segments it, Whisper
+    correctly reports STT_EMPTY, and the pipeline turns that into a
+    STAGE_FAILURE suppression. Counting those made a SILENT ROOM look like a
+    broken speech engine: the soak log filled with "stage stt failed 3 times
+    in 60s" while nothing was wrong. In a real meeting with any background
+    noise, Vaani would have declared STT degraded within the first minute.
+    """
+    s = make_session()
+    result = suppressed_result("stt")
+    result.error_code = "STT_EMPTY"
+    assert s.failing_stage(result) is None
+
+
+def test_an_empty_translation_is_not_a_provider_failure_either():
+    s = make_session()
+    result = suppressed_result("translate")
+    result.error_code = "TRANSLATION_EMPTY"
+    assert s.failing_stage(result) is None
+
+
+def test_a_real_stage_failure_is_still_counted():
+    """The fix must not blind the detector to genuine failures."""
+    s = make_session()
+    result = suppressed_result("translate")
+    result.error_code = "TRANSLATION_FAILURE"
+    assert s.failing_stage(result) == "translate"
+
+
+def test_benign_errors_never_trip_degraded_mode():
+    degraded: list[str] = []
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=3),
+        on_stage_degraded=degraded.append)
+    for _ in range(20):
+        result = suppressed_result("stt")
+        result.error_code = "STT_EMPTY"
+        s._note_stage_outcome(result)
+    assert degraded == []
+
+
+def test_degraded_announcements_are_rate_limited():
+    """The soak produced 20 identical ERROR lines in four minutes, because the
+    window resets on every trip. That buries everything else in the log."""
+    degraded: list[str] = []
+    s = TranslationSession(
+        recognizer=StubRecognizer(), translator=StubTranslator(),
+        synthesizer=FallbackSynthesizer(), vad=StubVad(),
+        config=SessionConfig(use_virtual_mic=False, stage_crash_limit=1,
+                             stage_degrade_cooldown_s=3600.0),
+        on_stage_degraded=degraded.append)
+    for _ in range(30):
+        s._note_stage_outcome(suppressed_result("translate"))
+    # Announced once; the cooldown suppresses the rest.
+    assert degraded == ["translate"]

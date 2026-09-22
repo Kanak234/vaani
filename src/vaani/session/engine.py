@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import uuid
 from collections import deque
 from collections.abc import Callable
@@ -93,6 +94,9 @@ class SessionConfig:
     #: A stage failing this many times inside the window drops to fallback.
     stage_crash_limit: int = 3
     stage_crash_window_s: float = 60.0
+    #: Minimum gap between "this stage is degraded" announcements, per stage.
+    #: Without it a persistently failing stage floods the log and the overlay.
+    stage_degrade_cooldown_s: float = 120.0
     gate: GateConfig = field(default_factory=GateConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
@@ -183,6 +187,8 @@ class TranslationSession:
         # These windows watch SUPPRESSED RESULTS instead, which is the signal
         # that actually exists on that path.
         self._stage_windows: dict[str, CrashWindow] = {}
+        #: When each stage last ANNOUNCED degradation, for the cooldown below.
+        self._stage_announced: dict[str, float] = {}
         self._on_stage_degraded = on_stage_degraded
         self.supervisor = StageSupervisor(
             "pipeline",
@@ -610,6 +616,16 @@ class TranslationSession:
         except Exception:
             pass
 
+    #: Error codes that mean "there was nothing to do", NOT "the provider is
+    #: broken". Found by the 30-minute soak: an idle microphone picks up room
+    #: noise, the VAD segments it, Whisper correctly reports STT_EMPTY, and the
+    #: pipeline turns that into a STAGE_FAILURE suppression. Counting those as
+    #: failures made a SILENT ROOM look like a broken speech engine - the soak
+    #: log filled with "stage stt failed 3 times in 60s" while nothing was
+    #: wrong at all. In a real meeting with any background noise, Vaani would
+    #: have declared STT degraded within the first minute.
+    BENIGN_ERROR_CODES = frozenset({"STT_EMPTY", "TRANSLATION_EMPTY"})
+
     def failing_stage(self, result: UtteranceResult) -> str | None:
         """Which stage failed, for a result suppressed by a stage failure.
 
@@ -622,6 +638,9 @@ class TranslationSession:
         if not result.suppressed:
             return None
         if result.suppression_reason is not SuppressionReason.STAGE_FAILURE:
+            return None
+        if result.error_code in self.BENIGN_ERROR_CODES:
+            # Nothing to do is not a failure. See BENIGN_ERROR_CODES.
             return None
         if not result.timings:
             return None
@@ -654,7 +673,18 @@ class TranslationSession:
         if not window.record_failure():
             return
 
-        _log.error("stage %s failed %d times in %.0fs - requesting fallback",
+        # COOLDOWN. Without it this fires every few seconds for as long as the
+        # stage keeps failing, because the window is reset on each trip. The
+        # 30-minute soak produced 20 identical ERROR lines in four minutes,
+        # which buries anything else in the log and tells the user nothing new.
+        now = time.monotonic()
+        last = self._stage_announced.get(stage, 0.0)
+        if now - last < self.config.stage_degrade_cooldown_s:
+            window.record_success()
+            return
+        self._stage_announced[stage] = now
+
+        _log.error("stage %s failed %d times in %.0fs - degraded",
                    stage, self.config.stage_crash_limit,
                    self.config.stage_crash_window_s)
         # Reset immediately so the REPLACEMENT provider gets its own full

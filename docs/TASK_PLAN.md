@@ -311,16 +311,37 @@ Could NOT verify here:
       `PYTHONPATH=src .venv/bin/python -m vaani.cli ...`, which is stale once
       install.sh puts `vaani` on PATH. Rewritten, and **all 19 documented
       commands were verified to exist** by invoking each one.
-- [ ] Comment pass: every file touched in v1 has rule-4 comments; remaining files
-      listed in the "comment backlog" below and done file by file
+- [x] Comment pass MEASURED rather than claimed. Files touched in v1 run a
+      comment:code ratio of 0.18–0.32 (`core/gate.py` 0.32, `session/engine.py`
+      0.21, `session/continuation.py` 0.21, `ipc/control.py` 0.19,
+      `ai/translate/ollama.py` 0.18) against a repo median of 0.07.
+- [ ] Remaining rule-4 backlog, named not glossed: the Windows modules (out of
+      v1 scope per D1) plus `system/platform.py`, `session/takeover.py`,
+      `system/ollama_manager.py`, `system/hardware.py`, `ui/components.py`,
+      `devices/routing.py`, `core/model_budget.py`, `core/state_machine.py`
+      (all 0.00–0.03).
 - [x] Fresh-clone install verified on the laptop (see above). A dedicated
       verify_phase6.sh is still not written; the manual run is recorded here
       with its results instead.
 
 ## Phase 7 — Final verification
-- [ ] Full suite + lint
-- [ ] Checklist A1–A8 with PASS / UNVERIFIED and evidence
-- [ ] List of what couldn't be verified (desktop machine, etc.)
+- [x] Full suite + lint: **588 passed**, ruff clean across src/tests/scripts,
+      install.sh syntax clean.
+- [x] Checklist A1–A8 with evidence → **docs/16-V1-ACCEPTANCE.md**.
+      4 PASS (A3 with a memory caveat), 4 PARTIAL. Every PARTIAL is partial
+      because it needs Kanak's voice, a second human, or the other machine —
+      none because of unfinished code.
+- [x] "What could NOT be verified" collected in one place at the end of
+      docs/16-V1-ACCEPTANCE.md (6 items).
+- [x] **The 30-minute soak found two real bugs that 583 passing tests had not:**
+      (1) `STT_EMPTY` from an idle microphone was counted as a provider failure,
+      so a SILENT ROOM looked like a broken speech engine — in a real meeting
+      with background noise Vaani would have declared STT degraded within the
+      first minute; (2) "requesting fallback" fired ~20 times in 4 minutes for a
+      stage with no fallback configured. Both fixed with regression tests.
+      Memory: +12.03% before the fixes (FAIL vs the ≤10% rule), +2.93% after.
+- [~] A clean 30-minute run AFTER the fixes. Run 2 was 20 minutes, so the
+      +2.93% is not a like-for-like replacement for run 1's number.
 
 ## Backlog raised during Phase 5
 - **Whisper hallucinates confident boilerplate on unintelligible audio**
@@ -403,3 +424,9 @@ Existing files not yet brought to the rule-4 comment standard: all of `src/vaani
 - 2026-09-23 Phase 6 GUI work done. Dashboard input-mode switch, real model
   status, and a Script screen. Suite 583 green, ruff clean. Phase 6 now complete
   except the rule-4 comment backlog on pre-existing files.
+- 2026-09-23 Phase 7 done. docs/16-V1-ACCEPTANCE.md written with A1-A8 evidence.
+  The 30-min soak was the highest-value test of the whole effort: two real bugs
+  that the unit suite could not have found, because both required a live
+  microphone in a quiet room. Suite 588 green, ruff clean.
+  Remaining: the rule-4 backlog on pre-existing files, and everything that needs
+  Kanak's voice / a real Meet call / the desktop machine.

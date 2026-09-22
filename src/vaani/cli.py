@@ -1141,9 +1141,13 @@ def cmd_meeting(args) -> int:
         saying nothing.
         """
         if stage != "translate":
-            # STT and TTS have no second engine configured in this build; the
-            # overlay warning has already told the user. Saying so honestly
-            # beats pretending a fallback happened.
+            # STT and TTS have no second engine configured in this build. Say
+            # so plainly instead of leaving the user waiting for a recovery
+            # that is never coming - the 30-minute soak logged "requesting
+            # fallback" twenty times for a stage with nothing to fall back to.
+            print(f"  [{stage}] failing repeatedly and there is no alternative "
+                  f"engine configured for it; check `vaani doctor`",
+                  file=sys.stderr)
             return
         current = session.pipeline.translator
         # NOTE THE NAMES: RoutingTranslator is built as
