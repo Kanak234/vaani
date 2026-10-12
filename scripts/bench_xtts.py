@@ -10,8 +10,10 @@ whether the product's core promise is deliverable on this hardware.
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -85,7 +87,7 @@ def main() -> int:
         peak_vram = max(peak_vram, observed_vram_mb() or 0)
         print(f"  {text[:46]:<46}{dur:>8.2f}s{ms:>9.0f}ms{ms/1000/dur:>7.2f}")
 
-    sf.write("/tmp/claude-1000/xtts_sample.wav", np.asarray(wav, dtype=np.float32), 24000)
+    sf.write(os.path.join(tempfile.gettempdir(), "xtts_sample.wav"), np.asarray(wav, dtype=np.float32), 24000)
 
     print("-" * 74)
     p50 = statistics.median(times)
